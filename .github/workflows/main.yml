@@ -1,0 +1,21 @@
+name: Sistema de Cortes Mídia
+on:
+  repository_dispatch:
+    types: [novo_relatorio]
+
+jobs:
+  gatekeeper:
+    runs-on: ubuntu-latest
+    environment: producao # Gera o e-mail de aprovação
+    steps:
+      - name: Aguardando Aprovação do Leonardo
+        run: echo "Aguardando aprovação manual via GitHub/E-mail."
+
+  processamento:
+    needs: gatekeeper
+    runs-on: self-hosted # Roda no seu RYZEN 5950X
+    steps:
+      - uses: actions/checkout@v3
+      - name: Executar Motor de Corte
+        # Passa os dados do relatório para o Python
+        run: python processar_cortes.py "${{ github.event.client_payload.relatorio }}" "${{ github.event.client_payload.url }}"
