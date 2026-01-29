@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Executar Motor de Corte
-        shell: cmd # Mudamos para CMD para evitar que o PowerShell tente ler os colchetes
+        shell: cmd
         env:
           RELATORIO_BRUTO: ${{ github.event.client_payload.relatorio }}
           URL_YOUTUBE: ${{ github.event.client_payload.url }}
