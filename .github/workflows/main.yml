@@ -8,8 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: producao
     steps:
-      - name: Aguardando Aprovação
-        run: echo "Aprovação pendente."
+      - name: Aprovação Manual
+        run: echo "Aguardando aprovação."
 
   processamento:
     needs: gatekeeper
@@ -17,11 +17,24 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Criar Arquivos de Dados
+      - name: Criar Arquivo de Relatorio
         shell: cmd
         run: |
           echo ${{ github.event.client_payload.url }} > url_temp.txt
-          (echo ${{ github.event.client_payload.relatorio }}) > relatorio_temp.txt
+          copy con relatorio_temp.txt > nul
+          ${{ github.event.client_payload.relatorio }}
+          ^Z
+        # Nota: O comando acima é uma forma bruta de salvar. 
+        # Mas para garantir 100%, usaremos a ação de escrita de arquivo oficial abaixo:
+      
+      - name: Gravar Dados Blindados
+        uses: appleboy/ssh-action@master # Apenas ilustrativo, use o método abaixo:
+        run: |
+           echo "${{ github.event.client_payload.url }}" > url_temp.txt
+           cat << 'EOF' > relatorio_temp.txt
+           ${{ github.event.client_payload.relatorio }}
+           EOF
+        shell: bash # Aqui o bash é seguro para gravar o arquivo no Windows
 
       - name: Executar Motor de Corte
         shell: cmd
