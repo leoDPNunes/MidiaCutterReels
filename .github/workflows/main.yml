@@ -8,19 +8,21 @@ jobs:
     runs-on: ubuntu-latest
     environment: producao
     steps:
-      - name: Aguardando Aprovação
-        run: echo "Aprovação pendente."
+      - name: Aprovação Manual
+        run: echo "Aguardando aprovação."
 
   processamento:
     needs: gatekeeper
     runs-on: self-hosted
-    defaults:
-      run:
-        shell: cmd # Força o CMD para todos os passos deste job
     steps:
       - uses: actions/checkout@v3
+      
+      - name: Criar Arquivo de Dados
+        shell: cmd
+        run: |
+          echo ${{ github.event.client_payload.url }} > url_temp.txt
+          echo "${{ github.event.client_payload.relatorio }}" > relatorio_temp.txt
+
       - name: Executar Motor de Corte
-        env:
-          RELATORIO_BRUTO: ${{ github.event.client_payload.relatorio }}
-          URL_YOUTUBE: ${{ github.event.client_payload.url }}
+        shell: cmd
         run: python processar_cortes.py
