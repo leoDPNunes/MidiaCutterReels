@@ -17,6 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - name: Executar Motor de Corte
+        # Forçamos o CMD para evitar que o PowerShell tente ler os colchetes do relatório
         shell: cmd
         env:
           RELATORIO_BRUTO: ${{ github.event.client_payload.relatorio }}
