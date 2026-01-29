@@ -3,21 +3,17 @@ from datetime import datetime
 import psutil
 import GPUtil
 
-# --- CONFIGURAÇÕES DE DIRETÓRIO ---
+# --- CONFIGURAÇÕES ---
 BASE_PATH = "F:/Cortes_midia"
 LOG_DIR = "D:/Coding/HTML/midia_cutter_reels/logs"
 DRIVE_NAME = "meu_drive" 
-
-# --- LIMITES TÉRMICOS (CONTROLE RJ) ---
-MAX_CPU_TEMP = 85  
 MAX_GPU_TEMP = 80  
 COOL_DOWN_TIME = 10 
 
 def obter_telemetria():
-    cpu_usage = psutil.cpu_percent()
+    cpu = psutil.cpu_percent()
     gpu = GPUtil.getGPUs()[0] if GPUtil.getGPUs() else None
-    gpu_temp = gpu.temperature if gpu else 0
-    return cpu_usage, gpu_temp
+    return cpu, (gpu.temperature if gpu else 0)
 
 def criar_caminho_hierarquico(data_video, titulo_video):
     ano = str(data_video.year)
@@ -29,6 +25,7 @@ def realizar_corte(url, inicio, duracao, nome_saida, destino_local):
     if not os.path.exists(destino_local): os.makedirs(destino_local)
     caminho_arquivo = os.path.join(destino_local, f"{nome_saida}.mp4")
     
+    # Aspas duplas na URL para evitar erro de caracteres especiais no CMD
     cmd_url = f'yt-dlp -g -f "bestvideo+bestaudio/best" "{url}"'
     urls = subprocess.check_output(cmd_url, shell=True).decode().split('\n')
     
@@ -45,7 +42,7 @@ def iniciar_processamento(relatorio, url_youtube):
     if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
     log_path = os.path.join(LOG_DIR, log_name)
 
-    print(f"🔍 Analisando vídeo: {url_youtube}")
+    print(f"🎬 Iniciando processamento do vídeo...")
     info_raw = subprocess.check_output(f'yt-dlp --dump-json "{url_youtube}"', shell=True)
     video_info = json.loads(info_raw)
     data_upload = datetime.strptime(video_info['upload_date'], '%Y%m%d')
@@ -57,21 +54,20 @@ def iniciar_processamento(relatorio, url_youtube):
 
     padrao = r"\[(\d{2}:\d{2}:\d{2})\].*?Duração:\s(\d{2}:\d{2})\)\nHook:\s\"(.*?)\""
     matches = re.findall(padrao, relatorio, re.DOTALL)
-    total_tarefas = len(matches)
+    total = len(matches)
 
     with open(log_path, "w", encoding="utf-8") as log:
-        log.write(f"# Relatório: {titulo_video}\n- **Início:** {start_time}\n- **Total:** {total_tarefas}\n\n")
-        log.write("| # | Corte | Status | CPU | GPU Temp |\n|---|---|---|---|---|\n")
+        log.write(f"# Processamento: {titulo_video}\n- Total: {total}\n\n| # | Corte | Status | CPU | GPU |\n|---|---|---|---|---|\n")
 
         for i, (inicio, duracao, titulo) in enumerate(matches, 1):
             cpu, g_temp = obter_telemetria()
             if g_temp > MAX_GPU_TEMP:
-                print(f"🌡️ Resfriando GPU ({g_temp}°C)...")
+                print(f"🌡️ Resfriando GPU: {g_temp}°C...")
                 time.sleep(30)
 
             nome_slug = re.sub(r'[^\w\s-]', '', titulo).replace(' ', '_')[:40]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-            print(f"[{ (i/total_tarefas)*100 :.1f}%] ({i}/{total_tarefas}) {titulo}")
+            print(f"[{ (i/total)*100 :.1f}%] Cortando: {titulo}")
             
             try:
                 realizar_corte(url_youtube, inicio, f"00:{duracao}", nome_final, pasta_local_final)
@@ -82,18 +78,17 @@ def iniciar_processamento(relatorio, url_youtube):
             log.write(f"| {i} | {titulo} | {status} | {cpu}% | {g_temp}°C |\n")
             time.sleep(COOL_DOWN_TIME)
 
-        print("\n☁️ Sincronizando com Google Drive...")
+        print("\n☁️ Enviando para Google Drive...")
         subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
 
-    print(f"\n✅ Concluído! Log: {log_name}")
+    print(f"✅ Concluído! Log salvo em: {LOG_DIR}")
     input("Pressione qualquer tecla para sair...")
 
 if __name__ == "__main__":
-    # Captura das variáveis enviadas pelo main.yml
     r_env = os.environ.get("RELATORIO_BRUTO")
     u_env = os.environ.get("URL_YOUTUBE")
     if r_env and u_env:
         iniciar_processamento(r_env, u_env)
     else:
-        print("❌ Erro: Variáveis de ambiente ausentes.")
+        print("❌ Erro: Variáveis de ambiente não detectadas.")
         time.sleep(10)
