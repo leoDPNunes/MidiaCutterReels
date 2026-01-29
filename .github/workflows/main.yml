@@ -17,24 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Criar Arquivo de Relatorio
-        shell: cmd
+      - name: Injetar Dados Blindados
+        shell: bash # O Bash é muito superior para lidar com textos longos e colchetes
         run: |
-          echo ${{ github.event.client_payload.url }} > url_temp.txt
-          copy con relatorio_temp.txt > nul
-          ${{ github.event.client_payload.relatorio }}
-          ^Z
-        # Nota: O comando acima é uma forma bruta de salvar. 
-        # Mas para garantir 100%, usaremos a ação de escrita de arquivo oficial abaixo:
-      
-      - name: Gravar Dados Blindados
-        uses: appleboy/ssh-action@master # Apenas ilustrativo, use o método abaixo:
-        run: |
-           echo "${{ github.event.client_payload.url }}" > url_temp.txt
-           cat << 'EOF' > relatorio_temp.txt
-           ${{ github.event.client_payload.relatorio }}
-           EOF
-        shell: bash # Aqui o bash é seguro para gravar o arquivo no Windows
+          echo "URL_YOUTUBE=${{ github.event.client_payload.url }}" >> $GITHUB_ENV
+          echo "RELATORIO_BRUTO<<EOF" >> $GITHUB_ENV
+          echo "${{ github.event.client_payload.relatorio }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Executar Motor de Corte
         shell: cmd
