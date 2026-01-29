@@ -6,16 +6,19 @@ on:
 jobs:
   gatekeeper:
     runs-on: ubuntu-latest
-    environment: producao # Gera o e-mail de aprovação
+    environment: producao
     steps:
-      - name: Aguardando Aprovação do Leonardo
-        run: echo "Aguardando aprovação manual via GitHub/E-mail."
+      - name: Aguardando Aprovação
+        run: echo "Aprovação pendente via e-mail/GitHub."
 
   processamento:
     needs: gatekeeper
-    runs-on: self-hosted # Roda no seu RYZEN 5950X
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v3
       - name: Executar Motor de Corte
-        # Passa os dados do relatório para o Python
-        run: python processar_cortes.py "${{ github.event.client_payload.relatorio }}" "${{ github.event.client_payload.url }}"
+        shell: cmd # Mudamos para CMD para evitar que o PowerShell tente ler os colchetes
+        env:
+          RELATORIO_BRUTO: ${{ github.event.client_payload.relatorio }}
+          URL_YOUTUBE: ${{ github.event.client_payload.url }}
+        run: python processar_cortes.py
