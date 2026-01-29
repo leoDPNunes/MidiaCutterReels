@@ -4,27 +4,13 @@ on:
     types: [novo_relatorio]
 
 jobs:
-  gatekeeper:
-    runs-on: ubuntu-latest
-    environment: producao
-    steps:
-      - name: Aprovação Manual
-        run: echo "Aguardando aprovação."
-
   processamento:
-    needs: gatekeeper
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v3
-
-      - name: Injetar Dados Blindados
-        shell: bash # O Bash é muito superior para lidar com textos longos e colchetes
-        run: |
-          echo "URL_YOUTUBE=${{ github.event.client_payload.url }}" >> $GITHUB_ENV
-          echo "RELATORIO_BRUTO<<EOF" >> $GITHUB_ENV
-          echo "${{ github.event.client_payload.relatorio }}" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
-
       - name: Executar Motor de Corte
         shell: cmd
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Permissão para o script ler o relatório
+          RUN_ID: ${{ github.run_id }}
         run: python processar_cortes.py
