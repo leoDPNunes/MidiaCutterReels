@@ -9,16 +9,17 @@ jobs:
     environment: producao
     steps:
       - name: Aguardando Aprovação
-        run: echo "Aprovação pendente via e-mail/GitHub."
+        run: echo "Aprovação pendente."
 
   processamento:
     needs: gatekeeper
     runs-on: self-hosted
+    defaults:
+      run:
+        shell: cmd # Força o CMD para todos os passos deste job
     steps:
       - uses: actions/checkout@v3
       - name: Executar Motor de Corte
-        # CMD ignora os colchetes que o PowerShell tenta processar
-        shell: cmd 
         env:
           RELATORIO_BRUTO: ${{ github.event.client_payload.relatorio }}
           URL_YOUTUBE: ${{ github.event.client_payload.url }}
