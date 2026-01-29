@@ -29,7 +29,7 @@ def realizar_corte(url, inicio, duracao, nome_saida, destino_local):
     if not os.path.exists(destino_local): os.makedirs(destino_local)
     caminho_arquivo = os.path.join(destino_local, f"{nome_saida}.mp4")
     
-    cmd_url = f'yt-dlp -g -f "bestvideo+bestaudio/best" {url}'
+    cmd_url = f'yt-dlp -g -f "bestvideo+bestaudio/best" "{url}"'
     urls = subprocess.check_output(cmd_url, shell=True).decode().split('\n')
     
     ffmpeg_cmd = [
@@ -45,8 +45,8 @@ def iniciar_processamento(relatorio, url_youtube):
     if not os.path.exists(LOG_DIR): os.makedirs(LOG_DIR)
     log_path = os.path.join(LOG_DIR, log_name)
 
-    print("🔍 Analisando metadados do vídeo...")
-    info_raw = subprocess.check_output(f'yt-dlp --dump-json {url_youtube}', shell=True)
+    print(f"🔍 Analisando vídeo: {url_youtube}")
+    info_raw = subprocess.check_output(f'yt-dlp --dump-json "{url_youtube}"', shell=True)
     video_info = json.loads(info_raw)
     data_upload = datetime.strptime(video_info['upload_date'], '%Y%m%d')
     titulo_video = video_info['title']
@@ -60,18 +60,18 @@ def iniciar_processamento(relatorio, url_youtube):
     total_tarefas = len(matches)
 
     with open(log_path, "w", encoding="utf-8") as log:
-        log.write(f"# Relatório de Processamento\n- **Vídeo:** {titulo_video}\n- **Total:** {total_tarefas}\n\n")
+        log.write(f"# Relatório: {titulo_video}\n- **Início:** {start_time}\n- **Total:** {total_tarefas}\n\n")
         log.write("| # | Corte | Status | CPU | GPU Temp |\n|---|---|---|---|---|\n")
 
         for i, (inicio, duracao, titulo) in enumerate(matches, 1):
             cpu, g_temp = obter_telemetria()
             if g_temp > MAX_GPU_TEMP:
-                print(f"🌡️ Alerta Térmico: {g_temp}°C. Pausando 30s...")
+                print(f"🌡️ Resfriando GPU ({g_temp}°C)...")
                 time.sleep(30)
 
             nome_slug = re.sub(r'[^\w\s-]', '', titulo).replace(' ', '_')[:40]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-            print(f"[{ (i/total_tarefas)*100 :.1f}%] ({i}/{total_tarefas}) Processando: {titulo}")
+            print(f"[{ (i/total_tarefas)*100 :.1f}%] ({i}/{total_tarefas}) {titulo}")
             
             try:
                 realizar_corte(url_youtube, inicio, f"00:{duracao}", nome_final, pasta_local_final)
@@ -82,21 +82,18 @@ def iniciar_processamento(relatorio, url_youtube):
             log.write(f"| {i} | {titulo} | {status} | {cpu}% | {g_temp}°C |\n")
             time.sleep(COOL_DOWN_TIME)
 
-        print(f"\n☁️ Sincronizando com o Drive...")
-        try:
-            subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
-            log.write(f"\n- **Upload Drive:** ✅ Sucesso\n")
-        except Exception as e:
-            log.write(f"\n- **Upload Drive:** ❌ Falha: {e}\n")
+        print("\n☁️ Sincronizando com Google Drive...")
+        subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
 
-    print(f"\n✨ Concluído! Log: {log_name}")
-    input("\nPressione qualquer tecla para encerrar...")
+    print(f"\n✅ Concluído! Log: {log_name}")
+    input("Pressione qualquer tecla para sair...")
 
 if __name__ == "__main__":
-    relatorio_env = os.environ.get("RELATORIO_BRUTO")
-    url_env = os.environ.get("URL_YOUTUBE")
-    if relatorio_env and url_env:
-        iniciar_processamento(relatorio_env, url_env)
+    # Captura das variáveis enviadas pelo main.yml
+    r_env = os.environ.get("RELATORIO_BRUTO")
+    u_env = os.environ.get("URL_YOUTUBE")
+    if r_env and u_env:
+        iniciar_processamento(r_env, u_env)
     else:
-        print("❌ Erro: Variáveis de ambiente não encontradas.")
+        print("❌ Erro: Variáveis de ambiente ausentes.")
         time.sleep(10)
