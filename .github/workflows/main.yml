@@ -8,20 +8,20 @@ jobs:
     runs-on: ubuntu-latest
     environment: producao
     steps:
-      - name: Aprovação Manual
-        run: echo "Aguardando aprovação."
+      - name: Aguardando Aprovação
+        run: echo "Aprovação pendente."
 
   processamento:
     needs: gatekeeper
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v3
-      
-      - name: Criar Arquivo de Dados
+
+      - name: Criar Arquivos de Dados
         shell: cmd
         run: |
           echo ${{ github.event.client_payload.url }} > url_temp.txt
-          echo "${{ github.event.client_payload.relatorio }}" > relatorio_temp.txt
+          (echo ${{ github.event.client_payload.relatorio }}) > relatorio_temp.txt
 
       - name: Executar Motor de Corte
         shell: cmd
