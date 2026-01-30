@@ -1,4 +1,4 @@
-import os, subprocess, re, time, json, argparse, hashlib
+import os, subprocess, re, time, json, argparse, hashlib, glob
 from datetime import datetime
 import sys
 
@@ -12,7 +12,7 @@ def force_utf8_stdio():
     except Exception:
         pass
 
-force_utf8_stdio()  # [web:563][web:534]
+force_utf8_stdio()
 
 import psutil
 import GPUtil
@@ -27,6 +27,8 @@ MAX_GPU_TEMP = 80
 COOL_DOWN_TIME = 10
 
 DOWNLOAD_CACHE_DIR = os.path.join(BASE_PATH, "_cache_downloads").replace("\\", "/")
+
+# Você pode trocar por um format que limite resolução se quiser
 YTDLP_FORMAT_FULL = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best'
 
 # =========================
@@ -46,6 +48,21 @@ YTDLP_NET_ARGS = [
     "--fragment-retries", "10",
     "--retry-sleep", "exp=1:20:2",
 ]
+
+# =========================
+# LOG / STATUS
+# =========================
+def log_step(msg: str):
+    ts = datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}")
+
+def fmt_td(seconds: float) -> str:
+    seconds = int(round(seconds))
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h{m:02d}m{s:02d}s"
+    return f"{m}m{s:02d}s"
 
 def obter_telemetria():
     cpu = psutil.cpu_percent()
@@ -144,17 +161,17 @@ def cache_key_for_url(url: str) -> str:
 def ytdlp_base_cmd():
     return ["yt-dlp", *YTDLP_COOKIES_ARGS, *YTDLP_EJS_ARGS, *YTDLP_JS_ARGS, *YTDLP_NET_ARGS]
 
-def garantir_download_inteiro(url_youtube: str, log_fn=print) -> str:
+def garantir_download_inteiro(url_youtube: str) -> str:
     os.makedirs(DOWNLOAD_CACHE_DIR, exist_ok=True)
     key = cache_key_for_url(url_youtube)
     outtmpl = os.path.join(DOWNLOAD_CACHE_DIR, f"{key}.%(ext)s")
     mp4_path = os.path.join(DOWNLOAD_CACHE_DIR, f"{key}.mp4")
 
     if os.path.exists(mp4_path):
-        log_fn(f"📦 Cache hit: usando vídeo já baixado ({mp4_path})")
+        log_step(f"Cache hit (vídeo inteiro): {mp4_path}")
         return mp4_path
 
-    log_fn("⬇️ Baixando vídeo inteiro (cache) via yt-dlp...")
+    log_step("Baixando vídeo inteiro (cache) via yt-dlp...")
     cmd = [
         *ytdlp_base_cmd(),
         "-f", YTDLP_FORMAT_FULL,
@@ -190,7 +207,7 @@ def cortar_local(video_path: str, inicio: str, duracao_mmss: str, saida_path: st
     if rc != 0:
         raise RuntimeError(out)
 
-def tentar_baixar_trecho(url_youtube: str, inicio_hhmmss: str, duracao_mmss: str, saida_path: str, log_fn=print):
+def tentar_baixar_trecho(url_youtube: str, inicio_hhmmss: str, duracao_mmss: str, saida_path: str):
     os.makedirs(os.path.dirname(saida_path), exist_ok=True)
     start = inicio_hhmmss
     end = seconds_to_hhmmss(hhmmss_to_seconds(inicio_hhmmss) + mmss_to_seconds(duracao_mmss))
@@ -205,55 +222,73 @@ def tentar_baixar_trecho(url_youtube: str, inicio_hhmmss: str, duracao_mmss: str
         "-o", saida_path,
         url_youtube
     ]
-    log_fn(f"🎯 Tentando baixar somente o trecho ({section})...")
     rc, out = run_cmd(cmd, check=False)
 
     if rc == 0 and os.path.exists(saida_path) and os.path.getsize(saida_path) > 0:
-        return True, out
-    return False, out
+        return True, out, section
+    return False, out, section
 
-def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local, log_fn=print):
+def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local):
     os.makedirs(destino_local, exist_ok=True)
     saida_path = os.path.join(destino_local, f"{nome_saida}.mp4")
 
-    ok, out_trecho = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path, log_fn=log_fn)
+    ok, out_trecho, section = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path)
     if ok:
-        return True, "B", out_trecho
+        return True, "B", out_trecho, saida_path, section
 
-    if is_403(out_trecho):
-        log_fn("⚠️ Trecho falhou com 403: YouTube recusou/expirou/ bloqueou a requisição.")
-    else:
-        log_fn("⚠️ Trecho falhou (não-403).")
-
-    log_fn("🔁 Fallback: baixando vídeo inteiro (cache) e cortando localmente...")
-    video_local = garantir_download_inteiro(url_youtube, log_fn=log_fn)
+    # Fallback A
+    video_local = garantir_download_inteiro(url_youtube)
     cortar_local(video_local, inicio, duracao_mmss, saida_path)
-    return True, "A", out_trecho
+    return True, "A", out_trecho, saida_path, section
+
+def listar_mp4(pasta_local_final: str):
+    return sorted(glob.glob(os.path.join(pasta_local_final, "*.mp4")))
+
+def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: str):
+    files = listar_mp4(pasta_local_final)
+    total = len(files)
+    log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
+
+    for i, fpath in enumerate(files, 1):
+        fname = os.path.basename(fpath)
+        dst = f"{pasta_drive_final}/{fname}"
+        log_step(f"Upload {i}/{total} INICIO: {fname}")
+
+        # --progress habilita stats contínuas; --stats 1s atualiza a cada 1s. [web:593]
+        cmd = ["rclone", "copyto", fpath, dst, "--progress", "--stats", "1s"]
+        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+        # imprime o progresso/stats no log do Actions/PowerShell
+        if p.stdout:
+            print(p.stdout)
+
+        if p.returncode != 0:
+            raise RuntimeError(f"Falha no upload {fname}:\n{p.stdout}")
+
+        log_step(f"Upload {i}/{total} FIM: {fname}")
+
+    log_step("Upload: concluído.")
 
 def iniciar_processamento(event_path: str):
+    pipeline_start = datetime.now()
+
     url_youtube, relatorio = ler_event_payload(event_path)
     if not url_youtube:
         raise ValueError("client_payload.url vazio")
     if not relatorio.strip():
         raise ValueError("client_payload.relatorio vazio")
 
-    start_time = datetime.now()
-    log_name = f"historico_{start_time.strftime('%d_%m_%Y_%H_%M_%S')}.md"
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, log_name)
+    log_step(f"Pipeline INICIO. URL={url_youtube}")
 
-    print(f"🔍 Analisando vídeo: {url_youtube}")
-
+    # Info do vídeo
     cmd_info = [*ytdlp_base_cmd(), "--dump-json", url_youtube]
     rc, out = run_cmd(cmd_info, check=False)
     if rc != 0:
-        print(out)
-        time.sleep(5)
-        return
+        raise RuntimeError(out)
     video_info = json.loads(out)
 
-    data_upload = datetime.strptime(video_info['upload_date'], '%Y%m%d')
-    titulo_video = video_info['title']
+    data_upload = datetime.strptime(video_info["upload_date"], "%Y%m%d")
+    titulo_video = video_info["title"]
 
     rel_path = criar_caminho_hierarquico(data_upload, titulo_video)
     pasta_local_final = os.path.join(BASE_PATH, rel_path)
@@ -261,51 +296,71 @@ def iniciar_processamento(event_path: str):
 
     cortes = extrair_cortes(relatorio)
     total = len(cortes)
-    print(f"✂️ Cortes encontrados: {total}")
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_name = f"historico_{pipeline_start.strftime('%d_%m_%Y_%H_%M_%S')}.md"
+    log_path = os.path.join(LOG_DIR, log_name)
+
+    log_step(f"Vídeo: {titulo_video}")
+    log_step(f"Cortes detectados: {total}")
+    log_step(f"Saída local: {pasta_local_final}")
+    log_step(f"Destino Drive: {pasta_drive_final}")
 
     with open(log_path, "w", encoding="utf-8") as log:
-        log.write(f"# Relatório: {titulo_video}\n- Total: {total}\n\n| # | Corte | Modo | Status | CPU | GPU |\n|---|---|---|---|---|---|\n")
+        log.write(f"# Relatório: {titulo_video}\n- Total: {total}\n\n| # | Corte | Modo | Status | Tempo | CPU | GPU |\n|---|---|---|---|---|---|---|\n")
 
         for idx, (inicio, duracao, titulo) in enumerate(cortes, 1):
             cpu, g_temp = obter_telemetria()
             if g_temp > MAX_GPU_TEMP:
-                print(f"🌡️ Resfriando GPU: {g_temp}°C...")
+                log_step(f"GPU quente ({g_temp}°C). Cooldown 30s...")
                 time.sleep(30)
 
+            pct = (idx / total) * 100 if total else 100
             nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:40]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-            print(f"[{(idx/total)*100:.1f}%] ({idx}/{total}) Cortando: {titulo}")
+            cut_start = datetime.now()
+
+            log_step(f"Corte {idx}/{total} ({pct:.1f}%) INICIO: {titulo} [{inicio} + {duracao}]")
 
             modo = "-"
-            status = "❌ Erro"
+            status = "ERRO"
+            saida_path = ""
+            section = ""
             ytdlp_tail = ""
 
             try:
-                _, modo, out_trecho = realizar_corte(
+                _, modo, out_trecho, saida_path, section = realizar_corte(
                     url_youtube=url_youtube,
                     inicio=inicio,
                     duracao_mmss=duracao,
                     nome_saida=nome_final,
-                    destino_local=pasta_local_final,
-                    log_fn=print
+                    destino_local=pasta_local_final
                 )
-                status = "✅ OK"
+                status = "OK"
                 ytdlp_tail = (out_trecho or "")[-2000:]
             except Exception as e:
                 err = str(e)
-                print(f"Erro no corte {idx}: {err}")
                 ytdlp_tail = err[-2000:]
+                log_step(f"Corte {idx}/{total} FALHOU: {err}")
 
-            log.write(f"| {idx} | {titulo} | {modo} | {status} | {cpu}% | {g_temp}°C |\n")
+            cut_end = datetime.now()
+            elapsed = (cut_end - cut_start).total_seconds()
+            log_step(f"Corte {idx}/{total} FIM: status={status} modo={modo} tempo={fmt_td(elapsed)} section={section} arquivo={saida_path}")
+
+            log.write(f"| {idx} | {titulo} | {modo} | {status} | {fmt_td(elapsed)} | {cpu}% | {g_temp}°C |\n")
             if ytdlp_tail:
-                log.write(f"\n<details><summary>Debug yt-dlp/ffmpeg corte #{idx}</summary>\n\n```\n{ytdlp_tail}\n```\n</details>\n\n")
+                log.write(f"\n<details><summary>Debug corte #{idx}</summary>\n\n```\n{ytdlp_tail}\n```\n</details>\n\n")
 
             time.sleep(COOL_DOWN_TIME)
 
-        print("\n☁️ Sincronizando com Google Drive...")
-        subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
+    # Upload
+    log_step("Upload: INICIO")
+    upload_drive_arquivo_a_arquivo(pasta_local_final, pasta_drive_final)
+    log_step("Upload: FIM")
 
-    print(f"\n✅ Concluído! Log: {log_name}")
+    pipeline_end = datetime.now()
+    total_s = (pipeline_end - pipeline_start).total_seconds()
+    log_step(f"Pipeline FIM. Tempo total: {fmt_td(total_s)}. Log: {log_name}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
