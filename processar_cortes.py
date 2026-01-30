@@ -3,6 +3,9 @@ from datetime import datetime
 import psutil
 import GPUtil
 
+# =========================
+# CONFIG DO SEU PROJETO
+# =========================
 BASE_PATH = "F:/Cortes_midia"
 LOG_DIR = "D:/Coding/HTML/midia_cutter_reels/logs"
 DRIVE_NAME = "meu_drive"
@@ -10,15 +13,31 @@ MAX_GPU_TEMP = 80
 COOL_DOWN_TIME = 10
 
 DOWNLOAD_CACHE_DIR = os.path.join(BASE_PATH, "_cache_downloads").replace("\\", "/")
+
+# Se quiser reduzir peso: limite altura (ex: "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best")
 YTDLP_FORMAT_FULL = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best'
 
-# yt-dlp hardening: força IPv4 e define retries/sleep [web:325][web:335]
+# =========================
+# CONFIG "TRAVADA" DO YT-DLP
+# =========================
+# Cookies: yt-dlp espera arquivo no formato Netscape (header "# Netscape HTTP Cookie File"). [web:469]
+YTDLP_COOKIES_TXT_PATH = r"D:\secrets\yt_cookies.txt"
+YTDLP_COOKIES_ARGS = ["--cookies", YTDLP_COOKIES_TXT_PATH]  # [web:347]
+
+# EJS: habilita download do solver via GitHub quando necessário. [web:393]
+YTDLP_EJS_ARGS = ["--remote-components", "ejs:github"]  # [web:393]
+
+# JS runtime: aponta node explicitamente (necessário no seu setup com nvm). [web:325]
+YTDLP_NODE_EXE = r"C:\nvm4w\nodejs\node.exe"
+YTDLP_JS_ARGS = ["--js-runtimes", f"node:{YTDLP_NODE_EXE}"]  # [web:325]
+
+# Rede: IPv4 + retries (fragment e backoff). [web:325]
 YTDLP_NET_ARGS = [
     "-4",
     "--retries", "10",
     "--fragment-retries", "10",
     "--retry-sleep", "exp=1:20:2",
-]
+]  # [web:325]
 
 def obter_telemetria():
     cpu = psutil.cpu_percent()
@@ -114,6 +133,10 @@ def is_403(output: str) -> bool:
 def cache_key_for_url(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
 
+def ytdlp_base_cmd():
+    # padrão pedido por você: sempre construir assim
+    return ["yt-dlp", *YTDLP_COOKIES_ARGS, *YTDLP_EJS_ARGS, *YTDLP_JS_ARGS, *YTDLP_NET_ARGS]
+
 def garantir_download_inteiro(url_youtube: str, log_fn=print) -> str:
     os.makedirs(DOWNLOAD_CACHE_DIR, exist_ok=True)
     key = cache_key_for_url(url_youtube)
@@ -125,12 +148,13 @@ def garantir_download_inteiro(url_youtube: str, log_fn=print) -> str:
         return mp4_path
 
     log_fn("⬇️ Baixando vídeo inteiro (cache) via yt-dlp...")
-    cmd = ["yt-dlp", *YTDLP_NET_ARGS,
-           "-f", YTDLP_FORMAT_FULL,
-           "--merge-output-format", "mp4",
-           "-o", outtmpl,
-           url_youtube]
-
+    cmd = [
+        *ytdlp_base_cmd(),
+        "-f", YTDLP_FORMAT_FULL,
+        "--merge-output-format", "mp4",
+        "-o", outtmpl,
+        url_youtube
+    ]
     rc, out = run_cmd(cmd, check=False)
     if rc != 0:
         raise RuntimeError(out)
@@ -161,42 +185,41 @@ def cortar_local(video_path: str, inicio: str, duracao_mmss: str, saida_path: st
 
 def tentar_baixar_trecho(url_youtube: str, inicio_hhmmss: str, duracao_mmss: str, saida_path: str, log_fn=print):
     os.makedirs(os.path.dirname(saida_path), exist_ok=True)
-
     start = inicio_hhmmss
     end = seconds_to_hhmmss(hhmmss_to_seconds(inicio_hhmmss) + mmss_to_seconds(duracao_mmss))
     section = f"*{start}-{end}"
 
-    cmd = ["yt-dlp", *YTDLP_NET_ARGS,
-           "-f", YTDLP_FORMAT_FULL,
-           "--download-sections", section,
-           "--force-keyframes-at-cuts",
-           "--merge-output-format", "mp4",
-           "-o", saida_path,
-           url_youtube]
-
+    cmd = [
+        *ytdlp_base_cmd(),
+        "-f", YTDLP_FORMAT_FULL,
+        "--download-sections", section,
+        "--force-keyframes-at-cuts",
+        "--merge-output-format", "mp4",
+        "-o", saida_path,
+        url_youtube
+    ]
     log_fn(f"🎯 Tentando baixar somente o trecho ({section})...")
     rc, out = run_cmd(cmd, check=False)
 
     if rc == 0 and os.path.exists(saida_path) and os.path.getsize(saida_path) > 0:
         return True, out
-
     return False, out
 
 def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local, log_fn=print):
     os.makedirs(destino_local, exist_ok=True)
     saida_path = os.path.join(destino_local, f"{nome_saida}.mp4")
 
-    # B
-    ok_trecho, out_trecho = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path, log_fn=log_fn)
-    if ok_trecho:
+    # B) baixar trecho
+    ok, out_trecho = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path, log_fn=log_fn)
+    if ok:
         return True, "B", out_trecho
 
     if is_403(out_trecho):
-        log_fn("⚠️ Trecho falhou com 403 (YouTube recusou/expirou/bloqueou a requisição).")
+        log_fn("⚠️ Trecho falhou com 403: YouTube recusou/expirou/ bloqueou a requisição.")
     else:
         log_fn("⚠️ Trecho falhou (não-403).")
 
-    # A
+    # A) fallback: baixar inteiro e cortar local
     log_fn("🔁 Fallback: baixando vídeo inteiro (cache) e cortando localmente...")
     try:
         video_local = garantir_download_inteiro(url_youtube, log_fn=log_fn)
@@ -205,7 +228,7 @@ def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local,
     except Exception as e:
         out_full = str(e)
         if is_403(out_trecho) and is_403(out_full):
-            log_fn("❌ Ambos falharam com 403: provavelmente YouTube recusou a autorização/assinatura (expirou) ou bloqueou seu IP/cliente.")
+            log_fn("❌ Ambos falharam com 403: provável recusa/bloqueio do YouTube ou assinatura/URL temporária expirada/recusada.")
         raise
 
 def iniciar_processamento(event_path: str):
@@ -226,9 +249,15 @@ def iniciar_processamento(event_path: str):
     log_path = os.path.join(LOG_DIR, log_name)
 
     print(f"🔍 Analisando vídeo: {url_youtube}")
-    # usa -4 também no dump-json
-    info_raw = subprocess.check_output(f'yt-dlp -4 --dump-json "{url_youtube}"', shell=True)
-    video_info = json.loads(info_raw)
+
+    # dump-json usando a mesma base cmd travada
+    cmd_info = [*ytdlp_base_cmd(), "--dump-json", url_youtube]
+    rc, out = run_cmd(cmd_info, check=False)
+    if rc != 0:
+        print(out)
+        time.sleep(5)
+        return
+    video_info = json.loads(out)
 
     data_upload = datetime.strptime(video_info['upload_date'], '%Y%m%d')
     titulo_video = video_info['title']
@@ -268,7 +297,6 @@ def iniciar_processamento(event_path: str):
                     log_fn=print
                 )
                 status = "✅ OK"
-                # salva um tail do output do yt-dlp do modo B para debug
                 ytdlp_tail = (out_trecho or "")[-2000:]
             except Exception as e:
                 err = str(e)
