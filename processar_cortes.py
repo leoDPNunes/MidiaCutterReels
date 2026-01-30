@@ -3,7 +3,6 @@ from datetime import datetime
 import psutil
 import GPUtil
 
-# --- CONFIGURAÇÕES ---
 BASE_PATH = "F:/Cortes_midia"
 LOG_DIR = "D:/Coding/HTML/midia_cutter_reels/logs"
 DRIVE_NAME = "meu_drive"
@@ -22,7 +21,6 @@ def criar_caminho_hierarquico(data_video, titulo_video):
     return os.path.join(ano, mes, categoria).replace("\\", "/")
 
 def limpar_url(url: str) -> str:
-    # Aceita URL normal e markdown: [http://x](http://x)
     s = (url or "").strip().strip('"').strip("'")
     m = re.search(r"\((https?://[^)]+)\)", s)
     return m.group(1).strip() if m else s
@@ -30,7 +28,6 @@ def limpar_url(url: str) -> str:
 def ler_event_payload(event_path: str):
     with open(event_path, "r", encoding="utf-8") as f:
         event = json.load(f)
-
     payload = event.get("client_payload", {})
     url = limpar_url(payload.get("url"))
     relatorio = payload.get("relatorio") or ""
@@ -38,46 +35,56 @@ def ler_event_payload(event_path: str):
 
 def extrair_cortes(relatorio: str):
     """
-    Retorna lista de tuplas: (inicio HH:MM:SS, duracao MM:SS, titulo)
-    Aceita estes formatos:
+    Extrai blocos do tipo:
+      [00:08:34] até (Duração: 01:10)
+      Hook: "A amargura ..."
 
-    A) Tudo na mesma linha:
-       [00:08:34] até (Duração: 01:10) Hook: "..."
-    B) Hook na linha seguinte (seu caso):
-       [00:08:34] até (Duração: 01:10)
-       Hook: "..."
-    C) Sem Hook: (pega o texto da linha seguinte ou da mesma linha)
+    e também:
+      [00:08:34] até (Duração: 01:10) Hook: "..."
+      [00:22:52] até (Duração: 01:18)
+      Cicatrizes vs. Feridas: ...
+
+    Retorna: [(inicio, duracao, titulo), ...]
     """
-    blocos = re.finditer(
-        r"\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s+(\d{2}:\d{2})\)\s*"
-        r"(?:\r?\n)?"
-        r"(?:(?:Hook:\s*)?(.+))?",
-        relatorio,
-        flags=re.MULTILINE
-    )
-
+    linhas = relatorio.splitlines()
     cortes = []
-    for m in blocos:
+
+    # Cabeçalho de tempo (sempre existe nos seus cortes)
+    re_tempo = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s+(\d{2}:\d{2})\)\s*(.*)$")
+
+    i = 0
+    while i < len(linhas):
+        m = re_tempo.match(linhas[i].strip())
+        if not m:
+            i += 1
+            continue
+
         inicio = m.group(1)
         duracao = m.group(2)
-        linha = (m.group(3) or "").strip()
+        resto_mesma_linha = (m.group(3) or "").strip()
 
-        # Se a linha capturada for vazia ou for um cabeçalho "Categoria:", tenta pegar a próxima linha útil
-        if not linha or linha.lower().startswith("categoria:"):
-            # pega um pedaço após o match e tenta achar a primeira linha não vazia
-            tail = relatorio[m.end():]
-            prox = re.search(r"^\s*(.+)\s*$", tail, flags=re.MULTILINE)
-            if prox:
-                linha = prox.group(1).strip()
+        titulo = ""
+        if resto_mesma_linha:
+            titulo = resto_mesma_linha
+        else:
+            # procura a próxima linha "útil" (pula vazias e "Categoria:")
+            j = i + 1
+            while j < len(linhas):
+                t = (linhas[j] or "").strip()
+                if not t or t.lower().startswith("categoria:"):
+                    j += 1
+                    continue
+                titulo = t
+                break
 
-        # Remove prefixos tipo "Hook:" e aspas
-        linha = re.sub(r"^Hook:\s*", "", linha, flags=re.IGNORECASE).strip()
-        linha = linha.strip('"').strip("'").strip()
+        titulo = re.sub(r"^Hook:\s*", "", titulo, flags=re.IGNORECASE).strip()
+        titulo = titulo.strip('"').strip("'").strip()
 
-        if not linha:
-            linha = f"corte_{len(cortes)+1}"
+        if not titulo:
+            titulo = f"corte_{len(cortes)+1}"
 
-        cortes.append((inicio, duracao, linha))
+        cortes.append((inicio, duracao, titulo))
+        i += 1
 
     return cortes
 
@@ -119,8 +126,7 @@ def iniciar_processamento(event_path: str):
 
     start_time = datetime.now()
     log_name = f"historico_{start_time.strftime('%d_%m_%Y_%H_%M_%S')}.md"
-    if not os.path.exists(LOG_DIR):
-        os.makedirs(LOG_DIR)
+    os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, log_name)
 
     print(f"🔍 Analisando vídeo: {url_youtube}")
@@ -136,22 +142,20 @@ def iniciar_processamento(event_path: str):
 
     cortes = extrair_cortes(relatorio)
     total = len(cortes)
+    print(f"✂️ Cortes encontrados: {total}")
 
     with open(log_path, "w", encoding="utf-8") as log:
         log.write(f"# Relatório: {titulo_video}\n- Total: {total}\n\n| # | Corte | Status | CPU | GPU |\n|---|---|---|---|---|\n")
 
-        for i, (inicio, duracao, titulo) in enumerate(cortes, 1):
+        for idx, (inicio, duracao, titulo) in enumerate(cortes, 1):
             cpu, g_temp = obter_telemetria()
             if g_temp > MAX_GPU_TEMP:
                 print(f"🌡️ Resfriando GPU: {g_temp}°C...")
                 time.sleep(30)
 
-            # Mantém nome baseado no título do hook
-            titulo_limpo = (titulo or "").strip()
-            nome_slug = re.sub(r"[^\w\s-]", "", titulo_limpo).replace(" ", "_")[:40]
+            nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:40]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-
-            print(f"[{(i/total)*100:.1f}%] ({i}/{total}) Cortando: {titulo_limpo}")
+            print(f"[{(idx/total)*100:.1f}%] ({idx}/{total}) Cortando: {titulo}")
 
             try:
                 realizar_corte(url_youtube, inicio, f"00:{duracao}", nome_final, pasta_local_final)
@@ -159,14 +163,13 @@ def iniciar_processamento(event_path: str):
             except Exception:
                 status = "❌ Erro"
 
-            log.write(f"| {i} | {titulo_limpo} | {status} | {cpu}% | {g_temp}°C |\n")
+            log.write(f"| {idx} | {titulo} | {status} | {cpu}% | {g_temp}°C |\n")
             time.sleep(COOL_DOWN_TIME)
 
         print("\n☁️ Sincronizando com Google Drive...")
         subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
 
     print(f"\n✅ Concluído! Log: {log_name}")
-    # Não use input() em CI (pode travar esperando stdin). [web:219]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
