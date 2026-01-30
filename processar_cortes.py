@@ -1,6 +1,7 @@
 import os, subprocess, re, time, json, argparse, hashlib, glob
 from datetime import datetime
 import sys
+import unicodedata
 
 # =========================
 # FIX: stdout/stderr UTF-8 (evita UnicodeEncodeError cp1252 no runner)
@@ -28,7 +29,6 @@ COOL_DOWN_TIME = 10
 
 DOWNLOAD_CACHE_DIR = os.path.join(BASE_PATH, "_cache_downloads").replace("\\", "/")
 
-# Você pode trocar por um format que limite resolução se quiser
 YTDLP_FORMAT_FULL = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best'
 
 # =========================
@@ -52,8 +52,28 @@ YTDLP_NET_ARGS = [
 # =========================
 # UPLOAD RETRY (EXTRA)
 # =========================
-UPLOAD_MAX_ATTEMPTS = 2          # 1 tentativa + 1 retry extra
-UPLOAD_RETRY_SLEEP_SEC = 8       # espera entre tentativas (pra rate limit/intermitência)
+UPLOAD_MAX_ATTEMPTS = 2
+UPLOAD_RETRY_SLEEP_SEC = 8
+
+# =========================
+# NOMES CONHECIDOS (CULTO)
+# =========================
+NOMES_CULTO_CONHECIDOS = [
+    "quinta viva com cristo",
+    "celebracao manha",
+    "celebracao noite",
+    "sunday night",
+    "kids",
+    "projeto familia",
+    "homens",
+    "mmr",
+    "santa ceia manha",
+    "santa ceia noite",
+    "consagracao",
+    "adola",
+    "conferencia",
+    "tarde teologica",
+]
 
 # =========================
 # LOG / STATUS
@@ -75,12 +95,127 @@ def obter_telemetria():
     gpu = GPUtil.getGPUs()[0] if GPUtil.getGPUs() else None
     return cpu, (gpu.temperature if gpu else 0)
 
-def criar_caminho_hierarquico(data_video, titulo_video):
+# =========================
+# NORMALIZAÇÃO / SLUG
+# =========================
+def _norm(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))  # remove acentos [web:688]
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def slugify(text: str) -> str:
+    text = _norm(text)
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text or "sem_nome"
+
+# =========================
+# FOCO (tipocorte)
+# =========================
+def detectar_tipo_corte(relatorio: str) -> str:
+    m = re.search(r'^Foco da Solicitação:\s*(.+)$', relatorio or "", re.MULTILINE | re.IGNORECASE)
+    v = (m.group(1) if m else "").lower()
+
+    if "louvor" in v:
+        return "LOUVOR"
+    if ("pregador" in v) or ("pregação" in v) or ("pastor" in v):
+        return "PREGACAO"
+    if ("oração" in v) or ("oracao" in v) or ("intercess" in v) or ("clamor" in v):
+        return "ORACAO"
+    if "testemun" in v or "relatos" in v or "experiên" in v or "experien" in v:
+        return "TESTEMUNHO"
+    if ("professor" in v) or ("professora" in v) or ("escola bíblica" in v) or ("ebd" in v) or ("aula" in v):
+        return "EBD"
+
+    return "OUTROS"
+
+def detectar_grupo_evento(relatorio: str) -> str:
+    # regra: se for EBD -> pasta EBD, senão -> CULTO
+    return "EBD" if detectar_tipo_corte(relatorio) == "EBD" else "CULTO"
+
+# =========================
+# EXTRAÇÃO "NOME DO CULTO" / GRANULARIDADE EBD
+# =========================
+def extrair_tema_ebd(titulo_video: str) -> str:
+    """
+    Exemplo real:
+    'AULA 04 - FERIDAS E AMARGURAS, FERIDAS DA REJEIÇÃO, PERDÃO | CLASSE GERAL | RECREIO | 25.01.26'
+    -> 'aula_04_feridas_e_amarguras_feridas_da_rejeicao_perdao'
+    """
+    t = _norm(titulo_video)
+
+    # remove partes após pipes (CLASSE GERAL | RECREIO | data)
+    t = t.split("|")[0].strip()
+
+    # remove sufixos óbvios e deixa só o tema da aula
+    # mantém "aula 04" se existir
+    t = re.sub(r"\s*-\s*", " - ", t).strip()
+
+    # normaliza separadores
+    t = t.replace(",", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # slug final
+    return slugify(t)
+
+def extrair_nome_do_culto(titulo_video: str, grupo: str) -> str:
+    """
+    Para CULTO: tenta bater com tokens conhecidos dentro dos '|' ou por substring.
+    Para EBD: retorna tema granular (aula + tema).
+    """
+    if grupo == "EBD":
+        return extrair_tema_ebd(titulo_video)
+
+    t = _norm(titulo_video)
+    parts = [p.strip() for p in t.split("|") if p.strip()]
+
+    cleaned = []
+    for p in parts:
+        if p in ("recreio", "classe geral"):
+            continue
+        if re.fullmatch(r"\d{2}\.\d{2}\.\d{2}", p):  # 25.01.26
+            continue
+        if p.startswith(("pr.", "pra.", "pastor", "pastora")):
+            continue
+        cleaned.append(p)
+
+    # match exato por token
+    for k in NOMES_CULTO_CONHECIDOS:
+        for p in cleaned:
+            if p == k:
+                return k
+
+    # match por substring no título todo
+    for k in NOMES_CULTO_CONHECIDOS:
+        if k in t:
+            return k
+
+    # fallback: primeiro bloco útil
+    return cleaned[0] if cleaned else titulo_video
+
+# =========================
+# PATH NOVO (espelhado)
+# =========================
+def criar_caminho_hierarquico(data_video, titulo_video, relatorio):
     ano = str(data_video.year)
     mes = data_video.strftime("%m_%B")
-    categoria = "EBD" if any(x in titulo_video.upper() for x in ["EBD", "AULA"]) else "Culto"
-    return os.path.join(ano, mes, categoria).replace("\\", "/")
 
+    grupo = detectar_grupo_evento(relatorio)             # EBD ou CULTO
+    tipocorte = detectar_tipo_corte(relatorio)           # LOUVOR/PREGACAO/ORACAO/TESTEMUNHO/EBD/...
+    nomeculto = extrair_nome_do_culto(titulo_video, grupo)
+
+    dia_mes_ano = data_video.strftime("%d_%m_%Y")
+    pasta_execucao = f"{dia_mes_ano}_{nomeculto}_{tipocorte}"
+
+    # slug final para segurança no Windows/Drive
+    pasta_execucao = slugify(pasta_execucao)
+
+    return os.path.join(ano, mes, grupo, pasta_execucao).replace("\\", "/")
+
+# =========================
+# EVENT PAYLOAD
+# =========================
 def limpar_url(url: str) -> str:
     s = (url or "").strip().strip('"').strip("'")
     m = re.search(r"\((https?://[^)]+)\)", s)
@@ -94,45 +229,189 @@ def ler_event_payload(event_path: str):
     relatorio = payload.get("relatorio") or ""
     return url, relatorio
 
+# =========================
+# PARSER UNIFICADO DE CORTES
+# =========================
 def extrair_cortes(relatorio: str):
-    linhas = relatorio.splitlines()
-    cortes = []
-    re_tempo = re.compile(r"^\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s+(\d{2}:\d{2})\)\s*(.*)$")
+    import re
 
-    i = 0
-    while i < len(linhas):
-        m = re_tempo.match(linhas[i].strip())
+    def detect_focus(text: str) -> str:
+        m = re.search(r'^Foco da Solicitação:\s*(.+)$', text, re.MULTILINE)
         if not m:
-            i += 1
-            continue
+            return "unknown"
+        v = m.group(1).lower()
 
-        inicio = m.group(1)
-        duracao = m.group(2)
-        resto_mesma_linha = (m.group(3) or "").strip()
+        if "louvor" in v:
+            return "louvor"
+        if ("pregador" in v) or ("pregação" in v) or ("pastor" in v):
+            return "pregacao"
+        if ("oração" in v) or ("oracao" in v) or ("intercess" in v) or ("clamor" in v):
+            return "oracao"
+        if "testemun" in v or "relatos" in v or "experiên" in v or "experien" in v:
+            return "testemunho"
+        if ("professor" in v) or ("professora" in v) or ("escola bíblica" in v) or ("ebd" in v) or ("aula" in v):
+            return "aula"
+        return "unknown"
 
-        titulo = ""
-        if resto_mesma_linha:
-            titulo = resto_mesma_linha
-        else:
+    def extrair_cortes_louvor(relatorio_louvor: str):
+        linhas = relatorio_louvor.splitlines()
+        cortes = []
+
+        re_header = re.compile(r'^Louvor\s*(\d+)\s*[—-]\s*(.+?)\s*$')
+        re_integral = re.compile(
+            r'^Integral:\s*\[\[(\d{2}:\d{2}:\d{2})\]\]\s+até\s+\[\[(\d{2}:\d{2}:\d{2})\]\]\s*\(Duração:\s*(\d{2}:\d{2})\)\s*$'
+        )
+        re_ouro = re.compile(
+            r'^Ouro\s*([A-D]):\s*\[\[(\d{2}:\d{2}:\d{2})\]\]\s+até\s+\[\[(\d{2}:\d{2}:\d{2})\]\]\s*\([^)]*\)\s*[—-]\s*(.*)$'
+        )
+
+        def to_seconds(hhmmss: str) -> int:
+            h, m, s = map(int, hhmmss.split(":"))
+            return h * 3600 + m * 60 + s
+
+        def seconds_to_mmss(sec: int) -> str:
+            if sec < 0:
+                sec = 0
+            m = sec // 60
+            s = sec % 60
+            return f"{m:02d}:{s:02d}"
+
+        def sanitize(s: str, max_len: int = 60) -> str:
+            s = (s or "").strip()
+            s = re.sub(r'[\\/:*?"<>|]', '', s)
+            s = re.sub(r'\s+', ' ', s)
+            return s[:max_len].strip()
+
+        cur = None
+        for raw in linhas:
+            line = (raw or "").strip()
+            if not line:
+                continue
+
+            mh = re_header.match(line)
+            if mh:
+                cur = {"idx": int(mh.group(1)), "nome": mh.group(2).strip()}
+                continue
+            if cur is None:
+                continue
+
+            mi = re_integral.match(line)
+            if mi:
+                inicio, fim, dur = mi.group(1), mi.group(2), mi.group(3)
+                titulo = f"LOUVOR_{cur['idx']:02d}_INTEGRAL__{sanitize(cur['nome'], 80)}"
+                cortes.append((inicio, dur, titulo))
+                continue
+
+            mo = re_ouro.match(line)
+            if mo:
+                letra, inicio, fim, trecho = mo.group(1), mo.group(2), mo.group(3), mo.group(4)
+                dur = seconds_to_mmss(to_seconds(fim) - to_seconds(inicio))
+                titulo = f"LOUVOR_{cur['idx']:02d}_OURO_{letra}__{sanitize(cur['nome'], 60)}__{sanitize(trecho, 60)}"
+                cortes.append((inicio, dur, titulo))
+                continue
+
+        return cortes
+
+    def extrair_cortes_pregacao(relatorio_preg: str):
+        linhas = relatorio_preg.splitlines()
+        cortes = []
+
+        re_md_dur = re.compile(
+            r'^\[\[(\d{1,2}:\d{2}(?::\d{2})?)\]\([^)]+\)\]\s+até\s+\[\[(\d{1,2}:\d{2}(?::\d{2})?)\]\([^)]+\)\]\s*\(Duração:\s*(\d{2}:\d{2})\)\s*(.*)$'
+        )
+
+        def to_hhmmss(t: str) -> str:
+            t = t.strip()
+            if re.match(r'^\d{1,2}:\d{2}:\d{2}$', t):
+                h, m, s = t.split(':')
+                return f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+            if re.match(r'^\d{1,2}:\d{2}$', t):
+                m, s = t.split(':')
+                return f"00:{int(m):02d}:{int(s):02d}"
+            return t
+
+        def sanitize_title(raw: str) -> str:
+            raw = (raw or "").strip()
+            raw = re.sub(r"^Hook:\s*", "", raw, flags=re.IGNORECASE).strip()
+            return raw.strip('"').strip("'").strip()
+
+        def guess_title_from_next(i: int) -> str:
             j = i + 1
             while j < len(linhas):
                 t = (linhas[j] or "").strip()
                 if not t or t.lower().startswith("categoria:"):
                     j += 1
                     continue
-                titulo = t
-                break
+                if re_md_dur.match(t):
+                    return ""
+                return sanitize_title(t)
+            return ""
 
-        titulo = re.sub(r"^Hook:\s*", "", titulo, flags=re.IGNORECASE).strip()
-        titulo = titulo.strip('"').strip("'").strip()
-        if not titulo:
-            titulo = f"corte_{len(cortes)+1}"
+        i = 0
+        while i < len(linhas):
+            line = (linhas[i] or "").strip()
+            m = re_md_dur.match(line)
+            if not m:
+                i += 1
+                continue
 
-        cortes.append((inicio, duracao, titulo))
-        i += 1
+            inicio = to_hhmmss(m.group(1))
+            dur = m.group(3)
 
-    return cortes
+            title_inline = sanitize_title(m.group(4))
+            title_next = guess_title_from_next(i)
+            titulo = title_inline or title_next or f"corte_{len(cortes)+1}"
 
+            cortes.append((inicio, dur, titulo))
+            i += 1
+
+        return cortes
+
+    def extrair_cortes_plain(relatorio_plain: str, prefix: str):
+        linhas = relatorio_plain.splitlines()
+        cortes = []
+
+        re_plain = re.compile(
+            r'^\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s*(\d{2}:\d{2})\)\s*(.*)$'
+        )
+
+        def sanitize_title(raw: str) -> str:
+            raw = (raw or "").strip()
+            raw = re.sub(r"^Assunto:\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"^Motivo:\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = re.sub(r"^Hook:\s*", "", raw, flags=re.IGNORECASE).strip()
+            raw = raw.strip('"').strip("'").strip()
+            return raw
+
+        for raw in linhas:
+            line = (raw or "").strip()
+            m = re_plain.match(line)
+            if not m:
+                continue
+            inicio, dur, rest = m.group(1), m.group(2), m.group(3)
+            titulo = sanitize_title(rest) or f"{prefix}_{len(cortes)+1}"
+            cortes.append((inicio, dur, titulo))
+
+        return cortes
+
+    focus = detect_focus(relatorio)
+
+    if focus == "louvor":
+        return extrair_cortes_louvor(relatorio)
+    if focus == "pregacao":
+        return extrair_cortes_pregacao(relatorio)
+    if focus == "testemunho":
+        return extrair_cortes_plain(relatorio, prefix="testemunho")
+    if focus == "oracao":
+        return extrair_cortes_plain(relatorio, prefix="oracao")
+    if focus == "aula":
+        return extrair_cortes_plain(relatorio, prefix="aula_professor")
+
+    raise ValueError("Não consegui detectar o foco do relatório (Foco da Solicitação).")
+
+# =========================
+# HELPERS TEMPO
+# =========================
 def hhmmss_to_seconds(hhmmss: str) -> int:
     h, m, s = hhmmss.split(":")
     return int(h) * 3600 + int(m) * 60 + int(s)
@@ -150,6 +429,9 @@ def seconds_to_hhmmss(sec: int) -> str:
     s = sec % 60
     return f"{h:02d}:{m:02d}:{s:02d}"
 
+# =========================
+# EXEC
+# =========================
 def run_cmd(cmd, check=True):
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=False)
     if check and p.returncode != 0:
@@ -237,7 +519,6 @@ def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local)
     if ok:
         return True, "B", out_trecho, saida_path, section
 
-    # Fallback A
     video_local = garantir_download_inteiro(url_youtube)
     cortar_local(video_local, inicio, duracao_mmss, saida_path)
     return True, "A", out_trecho, saida_path, section
@@ -257,7 +538,6 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
 
     ok_count = 0
     err_count = 0
-
     failed = []  # {name, dst, attempts, returncode, tail}
 
     log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
@@ -268,8 +548,8 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
     for i, fpath in enumerate(files, 1):
         fname = os.path.basename(fpath)
         dst = f"{pasta_drive_final}/{fname}"
-
         pct = (i / total) * 100.0
+
         log_step(f"Upload {i}/{total} ({pct:.1f}%) INICIO: {fname} | OK={ok_count} ERRO={err_count}")
 
         last_rc = None
@@ -330,7 +610,6 @@ def iniciar_processamento(event_path: str):
 
     log_step(f"Pipeline INICIO. URL={url_youtube}")
 
-    # Info do vídeo
     cmd_info = [*ytdlp_base_cmd(), "--dump-json", url_youtube]
     rc, out = run_cmd(cmd_info, check=False)
     if rc != 0:
@@ -340,7 +619,7 @@ def iniciar_processamento(event_path: str):
     data_upload = datetime.strptime(video_info["upload_date"], "%Y%m%d")
     titulo_video = video_info["title"]
 
-    rel_path = criar_caminho_hierarquico(data_upload, titulo_video)
+    rel_path = criar_caminho_hierarquico(data_upload, titulo_video, relatorio)
     pasta_local_final = os.path.join(BASE_PATH, rel_path)
     pasta_drive_final = f"{DRIVE_NAME}:/Cortes_Midia_Igreja/{rel_path}"
 
@@ -366,7 +645,7 @@ def iniciar_processamento(event_path: str):
                 time.sleep(30)
 
             pct = (idx / total) * 100 if total else 100
-            nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:40]
+            nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:80]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
             cut_start = datetime.now()
 
@@ -403,7 +682,6 @@ def iniciar_processamento(event_path: str):
 
             time.sleep(COOL_DOWN_TIME)
 
-    # Upload
     log_step("Upload: INICIO")
     upload_drive_arquivo_a_arquivo(pasta_local_final, pasta_drive_final)
     log_step("Upload: FIM")
