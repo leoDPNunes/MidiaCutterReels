@@ -8,6 +8,10 @@ jobs:
   processamento:
     name: processamento
     runs-on: [self-hosted, Windows, X64, midia-cutter]
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
+      PYTHONLEGACYWINDOWSSTDIO: "utf-8"
 
     steps:
       - name: Checkout
@@ -62,4 +66,4 @@ jobs:
 
       - name: Executar Motor de Corte
         shell: powershell
-        run: python processar_cortes.py --event-path "${{ github.event_path }}"
+        run: python -X utf8 processar_cortes.py --event-path "${{ github.event_path }}"
