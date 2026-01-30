@@ -5,9 +5,27 @@ on:
     types: [novo_relatorio]
 
 jobs:
+  preparar:
+    name: preparar
+    runs-on: [self-hosted, Windows, X64, midia-cutter]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Sanity do payload
+        shell: powershell
+        run: |
+          $url = "${{ github.event.client_payload.url }}"
+          $rel = "${{ github.event.client_payload.relatorio }}"
+          if (-not $url) { throw "client_payload.url vazio" }
+          if (-not $rel) { throw "client_payload.relatorio vazio" }
+          Write-Host "Payload OK. Job pesado vai aguardar aprovacao no Environment 'producao'."
+
   processamento:
     name: processamento
+    needs: preparar
     runs-on: [self-hosted, Windows, X64, midia-cutter]
+    environment: producao
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
@@ -16,13 +34,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Mostrar SHA
-        shell: powershell
-        run: |
-          echo "github.sha = ${{ github.sha }}"
-          git rev-parse HEAD
-          echo "workflow_sha = ${{ github.workflow_sha }}"
-
       - name: Forçar UTF-8 no PowerShell
         shell: powershell
         run: |
@@ -30,28 +41,23 @@ jobs:
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-          Write-Host "OK: PowerShell/Console em UTF-8"
-          python -c "import sys; print(sys.version); print(sys.stdout.encoding)"
+          python -c "import sys; print(sys.version); print('stdout=', sys.stdout.encoding)"
 
-      - name: Validar cookies/node/tools (inclui ACL)
+      - name: Validar cookies/node/tools
         shell: powershell
         run: |
           $cookiePath = "D:\secrets\yt_cookies.txt"
           $nodePath   = "C:\nvm4w\nodejs\node.exe"
 
           if (!(Test-Path $cookiePath)) { throw "cookies.txt nao existe: $cookiePath" }
-
-          Write-Host "ACL do cookies.txt:"
-          icacls $cookiePath
-
           Get-Content -Path $cookiePath -TotalCount 1 | Out-Null
-          Write-Host "OK: cookies.txt existe e pode ser lido"
 
           if (!(Test-Path $nodePath)) { throw "node.exe nao existe: $nodePath" }
           & $nodePath -v
 
           yt-dlp --version
           ffmpeg -version
+          rclone version
 
       - name: Smoke test yt-dlp (list-formats)
         shell: powershell
@@ -64,7 +70,9 @@ jobs:
                 --remote-components ejs:github `
                 --js-runtimes "node:C:\nvm4w\nodejs\node.exe" `
                 -4 --retries 3 --fragment-retries 3 --retry-sleep "exp=1:10:2" `
-                --list-formats "$url"
+                --list-formats "$url" | Out-Null
+
+          Write-Host "OK: yt-dlp passou no smoke test."
 
       - name: Executar Motor de Corte
         shell: powershell
