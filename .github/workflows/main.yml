@@ -9,13 +9,6 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Debug payload (opcional)
-        shell: powershell
-        run: |
-          Write-Host "event_type: ${{ github.event.action }}"
-          Write-Host '${{ toJson(github.event.client_payload) }}'
-
       - name: Executar Motor de Corte
         shell: powershell
-        run: |
-          python processar_cortes.py --event-path "${{ github.event_path }}"
+        run: python processar_cortes.py --event-path "${{ github.event_path }}"
