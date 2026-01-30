@@ -22,11 +22,10 @@ def criar_caminho_hierarquico(data_video, titulo_video):
     return os.path.join(ano, mes, categoria).replace("\\", "/")
 
 def limpar_url(url: str) -> str:
-    # Aceita url normal e também markdown do tipo: [http://x](http://x)
-    m = re.search(r"\((https?://[^)]+)\)", url or "")
-    if m:
-        return m.group(1).strip()
-    return (url or "").strip().strip('"').strip("'")
+    # Aceita URL normal e markdown: [http://x](http://x)
+    s = (url or "").strip().strip('"').strip("'")
+    m = re.search(r"\((https?://[^)]+)\)", s)
+    return m.group(1).strip() if m else s
 
 def ler_event_payload(event_path: str):
     with open(event_path, "r", encoding="utf-8") as f:
@@ -37,6 +36,51 @@ def ler_event_payload(event_path: str):
     relatorio = payload.get("relatorio") or ""
     return url, relatorio
 
+def extrair_cortes(relatorio: str):
+    """
+    Retorna lista de tuplas: (inicio HH:MM:SS, duracao MM:SS, titulo)
+    Aceita estes formatos:
+
+    A) Tudo na mesma linha:
+       [00:08:34] até (Duração: 01:10) Hook: "..."
+    B) Hook na linha seguinte (seu caso):
+       [00:08:34] até (Duração: 01:10)
+       Hook: "..."
+    C) Sem Hook: (pega o texto da linha seguinte ou da mesma linha)
+    """
+    blocos = re.finditer(
+        r"\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s+(\d{2}:\d{2})\)\s*"
+        r"(?:\r?\n)?"
+        r"(?:(?:Hook:\s*)?(.+))?",
+        relatorio,
+        flags=re.MULTILINE
+    )
+
+    cortes = []
+    for m in blocos:
+        inicio = m.group(1)
+        duracao = m.group(2)
+        linha = (m.group(3) or "").strip()
+
+        # Se a linha capturada for vazia ou for um cabeçalho "Categoria:", tenta pegar a próxima linha útil
+        if not linha or linha.lower().startswith("categoria:"):
+            # pega um pedaço após o match e tenta achar a primeira linha não vazia
+            tail = relatorio[m.end():]
+            prox = re.search(r"^\s*(.+)\s*$", tail, flags=re.MULTILINE)
+            if prox:
+                linha = prox.group(1).strip()
+
+        # Remove prefixos tipo "Hook:" e aspas
+        linha = re.sub(r"^Hook:\s*", "", linha, flags=re.IGNORECASE).strip()
+        linha = linha.strip('"').strip("'").strip()
+
+        if not linha:
+            linha = f"corte_{len(cortes)+1}"
+
+        cortes.append((inicio, duracao, linha))
+
+    return cortes
+
 def realizar_corte(url, inicio, duracao, nome_saida, destino_local):
     if not os.path.exists(destino_local):
         os.makedirs(destino_local)
@@ -46,10 +90,8 @@ def realizar_corte(url, inicio, duracao, nome_saida, destino_local):
     cmd_url = f'yt-dlp -g -f "bestvideo+bestaudio/best" "{url}"'
     urls = subprocess.check_output(cmd_url, shell=True).decode().split('\n')
 
-    # yt-dlp -g geralmente retorna 2 linhas (video e audio) no caso bestvideo+bestaudio
-    v_url = urls[0].strip()
+    v_url = urls[0].strip() if len(urls) > 0 else ""
     a_url = urls[1].strip() if len(urls) > 1 else ""
-
     if not v_url or not a_url:
         raise RuntimeError("yt-dlp não retornou URLs de vídeo/áudio como esperado.")
 
@@ -64,7 +106,6 @@ def realizar_corte(url, inicio, duracao, nome_saida, destino_local):
     subprocess.run(ffmpeg_cmd, check=True)
 
 def iniciar_processamento(event_path: str):
-    # 1) Ler URL/relatorio do repository_dispatch via github.event_path [web:154][web:155]
     try:
         url_youtube, relatorio = ler_event_payload(event_path)
         if not url_youtube:
@@ -93,35 +134,29 @@ def iniciar_processamento(event_path: str):
     pasta_local_final = os.path.join(BASE_PATH, rel_path)
     pasta_drive_final = f"{DRIVE_NAME}:/Cortes_Midia_Igreja/{rel_path}"
 
-    # 2) Regex adaptado ao seu relatório (uma entrada por linha)
-    # Ex.: [00:08:34] até (Duração: 01:10) Hook: "A amargura é o veneno..."
-    # Captura: inicio (HH:MM:SS), duracao (MM:SS), titulo (resto da linha)
-    padrao = r'^\[(\d{2}:\d{2}:\d{2})\]\s+até\s+\(Duração:\s+(\d{2}:\d{2})\)\s*(?:Hook:\s*)?(.*)$'
-    matches = re.findall(padrao, relatorio, flags=re.MULTILINE)  # MULTILINE faz ^/$ funcionarem por linha [web:154]
-    total = len(matches)
+    cortes = extrair_cortes(relatorio)
+    total = len(cortes)
 
     with open(log_path, "w", encoding="utf-8") as log:
         log.write(f"# Relatório: {titulo_video}\n- Total: {total}\n\n| # | Corte | Status | CPU | GPU |\n|---|---|---|---|---|\n")
 
-        for i, (inicio, duracao, titulo) in enumerate(matches, 1):
+        for i, (inicio, duracao, titulo) in enumerate(cortes, 1):
             cpu, g_temp = obter_telemetria()
             if g_temp > MAX_GPU_TEMP:
                 print(f"🌡️ Resfriando GPU: {g_temp}°C...")
                 time.sleep(30)
 
-            # Mantém nome baseado no título do hook (como você pediu)
+            # Mantém nome baseado no título do hook
             titulo_limpo = (titulo or "").strip()
-            if not titulo_limpo:
-                titulo_limpo = f"corte_{i}"
-
-            nome_slug = re.sub(r'[^\w\s-]', '', titulo_limpo).replace(' ', '_')[:40]
+            nome_slug = re.sub(r"[^\w\s-]", "", titulo_limpo).replace(" ", "_")[:40]
             nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-            print(f"[{ (i/total)*100 :.1f}%] ({i}/{total}) Cortando: {titulo_limpo}")
+
+            print(f"[{(i/total)*100:.1f}%] ({i}/{total}) Cortando: {titulo_limpo}")
 
             try:
                 realizar_corte(url_youtube, inicio, f"00:{duracao}", nome_final, pasta_local_final)
                 status = "✅ OK"
-            except Exception as e:
+            except Exception:
                 status = "❌ Erro"
 
             log.write(f"| {i} | {titulo_limpo} | {status} | {cpu}% | {g_temp}°C |\n")
@@ -131,7 +166,7 @@ def iniciar_processamento(event_path: str):
         subprocess.run(['rclone', 'copy', pasta_local_final, pasta_drive_final], check=True)
 
     print(f"\n✅ Concluído! Log: {log_name}")
-    # Não use input() em ambiente de CI senão pode travar aguardando stdin. [web:159]
+    # Não use input() em CI (pode travar esperando stdin). [web:219]
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
