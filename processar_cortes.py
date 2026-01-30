@@ -3,6 +3,9 @@ from datetime import datetime
 import sys
 import unicodedata
 
+import psutil
+import GPUtil
+
 # =========================
 # FIX: stdout/stderr UTF-8 (evita UnicodeEncodeError cp1252 no runner)
 # =========================
@@ -15,9 +18,6 @@ def force_utf8_stdio():
 
 force_utf8_stdio()
 
-import psutil
-import GPUtil
-
 # =========================
 # CONFIG DO SEU PROJETO
 # =========================
@@ -25,7 +25,7 @@ BASE_PATH = "F:/Cortes_midia"
 LOG_DIR = "D:/Coding/HTML/midia_cutter_reels/logs"
 DRIVE_NAME = "meu_drive"
 MAX_GPU_TEMP = 80
-COOL_DOWN_TIME = 10
+COOL_DOWN_TIME = 2  # menor; como agora louvor é corte local, pode ir mais rápido
 
 DOWNLOAD_CACHE_DIR = os.path.join(BASE_PATH, "_cache_downloads").replace("\\", "/")
 
@@ -80,7 +80,7 @@ NOMES_CULTO_CONHECIDOS = [
 # =========================
 def log_step(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
-    print(f"[{ts}] {msg}")
+    print(f"[{ts}] {msg}", flush=True)
 
 def fmt_td(seconds: float) -> str:
     seconds = int(round(seconds))
@@ -100,7 +100,7 @@ def obter_telemetria():
 # =========================
 def _norm(s: str) -> str:
     s = (s or "").strip().lower()
-    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))  # remove acentos [web:688]
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
     s = re.sub(r"\s+", " ", s)
     return s
 
@@ -131,39 +131,20 @@ def detectar_tipo_corte(relatorio: str) -> str:
     return "OUTROS"
 
 def detectar_grupo_evento(relatorio: str) -> str:
-    # regra: se for EBD -> pasta EBD, senão -> CULTO
     return "EBD" if detectar_tipo_corte(relatorio) == "EBD" else "CULTO"
 
 # =========================
 # EXTRAÇÃO "NOME DO CULTO" / GRANULARIDADE EBD
 # =========================
 def extrair_tema_ebd(titulo_video: str) -> str:
-    """
-    Exemplo real:
-    'AULA 04 - FERIDAS E AMARGURAS, FERIDAS DA REJEIÇÃO, PERDÃO | CLASSE GERAL | RECREIO | 25.01.26'
-    -> 'aula_04_feridas_e_amarguras_feridas_da_rejeicao_perdao'
-    """
     t = _norm(titulo_video)
-
-    # remove partes após pipes (CLASSE GERAL | RECREIO | data)
     t = t.split("|")[0].strip()
-
-    # remove sufixos óbvios e deixa só o tema da aula
-    # mantém "aula 04" se existir
     t = re.sub(r"\s*-\s*", " - ", t).strip()
-
-    # normaliza separadores
     t = t.replace(",", " ")
     t = re.sub(r"\s+", " ", t).strip()
-
-    # slug final
     return slugify(t)
 
 def extrair_nome_do_culto(titulo_video: str, grupo: str) -> str:
-    """
-    Para CULTO: tenta bater com tokens conhecidos dentro dos '|' ou por substring.
-    Para EBD: retorna tema granular (aula + tema).
-    """
     if grupo == "EBD":
         return extrair_tema_ebd(titulo_video)
 
@@ -174,24 +155,21 @@ def extrair_nome_do_culto(titulo_video: str, grupo: str) -> str:
     for p in parts:
         if p in ("recreio", "classe geral"):
             continue
-        if re.fullmatch(r"\d{2}\.\d{2}\.\d{2}", p):  # 25.01.26
+        if re.fullmatch(r"\d{2}\.\d{2}\.\d{2}", p):
             continue
         if p.startswith(("pr.", "pra.", "pastor", "pastora")):
             continue
         cleaned.append(p)
 
-    # match exato por token
     for k in NOMES_CULTO_CONHECIDOS:
         for p in cleaned:
             if p == k:
                 return k
 
-    # match por substring no título todo
     for k in NOMES_CULTO_CONHECIDOS:
         if k in t:
             return k
 
-    # fallback: primeiro bloco útil
     return cleaned[0] if cleaned else titulo_video
 
 # =========================
@@ -201,15 +179,12 @@ def criar_caminho_hierarquico(data_video, titulo_video, relatorio):
     ano = str(data_video.year)
     mes = data_video.strftime("%m_%B")
 
-    grupo = detectar_grupo_evento(relatorio)             # EBD ou CULTO
-    tipocorte = detectar_tipo_corte(relatorio)           # LOUVOR/PREGACAO/ORACAO/TESTEMUNHO/EBD/...
+    grupo = detectar_grupo_evento(relatorio)
+    tipocorte = detectar_tipo_corte(relatorio)
     nomeculto = extrair_nome_do_culto(titulo_video, grupo)
 
     dia_mes_ano = data_video.strftime("%d_%m_%Y")
-    pasta_execucao = f"{dia_mes_ano}_{nomeculto}_{tipocorte}"
-
-    # slug final para segurança no Windows/Drive
-    pasta_execucao = slugify(pasta_execucao)
+    pasta_execucao = slugify(f"{dia_mes_ano}_{nomeculto}_{tipocorte}")
 
     return os.path.join(ano, mes, grupo, pasta_execucao).replace("\\", "/")
 
@@ -410,7 +385,7 @@ def extrair_cortes(relatorio: str):
     raise ValueError("Não consegui detectar o foco do relatório (Foco da Solicitação).")
 
 # =========================
-# HELPERS TEMPO
+# TEMPO
 # =========================
 def hhmmss_to_seconds(hhmmss: str) -> int:
     h, m, s = hhmmss.split(":")
@@ -430,13 +405,20 @@ def seconds_to_hhmmss(sec: int) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 # =========================
-# EXEC
+# EXEC (AO VIVO)
 # =========================
-def run_cmd(cmd, check=True):
-    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, shell=False)
-    if check and p.returncode != 0:
-        raise RuntimeError(p.stdout)
-    return p.returncode, p.stdout
+def run_cmd_live(cmd, check=True):
+    log_step("CMD: " + " ".join(str(x) for x in cmd))
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    out_lines = []
+    for line in p.stdout:
+        print(line, end="", flush=True)
+        out_lines.append(line)
+    rc = p.wait()
+    out = "".join(out_lines)
+    if check and rc != 0:
+        raise RuntimeError(out)
+    return rc, out
 
 def cache_key_for_url(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
@@ -450,7 +432,7 @@ def garantir_download_inteiro(url_youtube: str) -> str:
     outtmpl = os.path.join(DOWNLOAD_CACHE_DIR, f"{key}.%(ext)s")
     mp4_path = os.path.join(DOWNLOAD_CACHE_DIR, f"{key}.mp4")
 
-    if os.path.exists(mp4_path):
+    if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 0:
         log_step(f"Cache hit (vídeo inteiro): {mp4_path}")
         return mp4_path
 
@@ -462,31 +444,35 @@ def garantir_download_inteiro(url_youtube: str) -> str:
         "-o", outtmpl,
         url_youtube
     ]
-    rc, out = run_cmd(cmd, check=False)
+    rc, out = run_cmd_live(cmd, check=False)
     if rc != 0:
         raise RuntimeError(out)
 
-    if not os.path.exists(mp4_path):
-        for fn in os.listdir(DOWNLOAD_CACHE_DIR):
-            if fn.startswith(key + "."):
-                return os.path.join(DOWNLOAD_CACHE_DIR, fn)
-        raise RuntimeError("Download inteiro finalizou, mas arquivo não encontrado no cache.")
+    if os.path.exists(mp4_path) and os.path.getsize(mp4_path) > 0:
+        return mp4_path
 
-    return mp4_path
+    # fallback: acha o arquivo gerado
+    for fn in os.listdir(DOWNLOAD_CACHE_DIR):
+        if fn.startswith(key + ".") and os.path.getsize(os.path.join(DOWNLOAD_CACHE_DIR, fn)) > 0:
+            return os.path.join(DOWNLOAD_CACHE_DIR, fn)
+
+    raise RuntimeError("Download inteiro finalizou, mas arquivo não encontrado no cache.")
 
 def cortar_local(video_path: str, inicio: str, duracao_mmss: str, saida_path: str):
     duracao = f"00:{duracao_mmss}"
     os.makedirs(os.path.dirname(saida_path), exist_ok=True)
 
+    # -c copy (rápido) -> não usa GPU; é mux/corte.
     cmd = [
         "ffmpeg", "-y",
+        "-hide_banner",
         "-ss", inicio,
         "-t", duracao,
         "-i", video_path,
         "-c", "copy",
         saida_path
     ]
-    rc, out = run_cmd(cmd, check=False)
+    rc, out = run_cmd_live(cmd, check=False)
     if rc != 0:
         raise RuntimeError(out)
 
@@ -505,15 +491,25 @@ def tentar_baixar_trecho(url_youtube: str, inicio_hhmmss: str, duracao_mmss: str
         "-o", saida_path,
         url_youtube
     ]
-    rc, out = run_cmd(cmd, check=False)
+    rc, out = run_cmd_live(cmd, check=False)
 
     if rc == 0 and os.path.exists(saida_path) and os.path.getsize(saida_path) > 0:
         return True, out, section
     return False, out, section
 
-def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local):
+def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local, tipocorte):
     os.makedirs(destino_local, exist_ok=True)
     saida_path = os.path.join(destino_local, f"{nome_saida}.mp4")
+
+    # =========================
+    # AJUSTE ANTI-HLS:
+    # Para LOUVOR, NÃO usa download-sections (modo B).
+    # Baixa inteiro (1x) e corta local (modo A).
+    # =========================
+    if tipocorte == "LOUVOR":
+        video_local = garantir_download_inteiro(url_youtube)
+        cortar_local(video_local, inicio, duracao_mmss, saida_path)
+        return True, "A", "", saida_path, ""
 
     ok, out_trecho, section = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path)
     if ok:
@@ -527,7 +523,6 @@ def listar_mp4(pasta_local_final: str):
     return sorted(glob.glob(os.path.join(pasta_local_final, "*.mp4")))
 
 def _rclone_copyto_with_progress(src_path: str, dst_path: str):
-    # --progress habilita stats contínuas; --stats 1s atualiza a cada 1s. [web:593]
     cmd = ["rclone", "copyto", src_path, dst_path, "--progress", "--stats", "1s"]
     p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     return p.returncode, (p.stdout or "")
@@ -538,7 +533,7 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
 
     ok_count = 0
     err_count = 0
-    failed = []  # {name, dst, attempts, returncode, tail}
+    failed = []
 
     log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
     if total == 0:
@@ -562,7 +557,7 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
             last_rc, last_out = rc, out
 
             if out:
-                print(out)
+                print(out, flush=True)
 
             if rc == 0:
                 break
@@ -594,13 +589,17 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
         log_step("Upload: ARQUIVOS QUE NÃO SUBIRAM (após retries):")
         for j, item in enumerate(failed, 1):
             log_step(f"{j}) {item['name']} -> {item['dst']} (tentativas={item['attempts']}, returncode={item['returncode']})")
-            print(item["tail"])
+            print(item["tail"], flush=True)
 
         names = ", ".join([x["name"] for x in failed])
         raise RuntimeError(f"Upload falhou para {len(failed)}/{total} arquivo(s) após retries: {names}")
 
 def iniciar_processamento(event_path: str):
     pipeline_start = datetime.now()
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    log_step("DEBUG: iniciar_processamento entrou")
+    log_step(f"DEBUG: event_path={event_path}")
 
     url_youtube, relatorio = ler_event_payload(event_path)
     if not url_youtube:
@@ -608,13 +607,18 @@ def iniciar_processamento(event_path: str):
     if not relatorio.strip():
         raise ValueError("client_payload.relatorio vazio")
 
+    tipocorte = detectar_tipo_corte(relatorio)
+    log_step(f"DEBUG: tipocorte={tipocorte}")
     log_step(f"Pipeline INICIO. URL={url_youtube}")
 
+    # pega info do vídeo (title/upload_date)
+    log_step("DEBUG: yt-dlp --dump-json INICIO")
     cmd_info = [*ytdlp_base_cmd(), "--dump-json", url_youtube]
-    rc, out = run_cmd(cmd_info, check=False)
+    rc, out = run_cmd_live(cmd_info, check=False)
     if rc != 0:
         raise RuntimeError(out)
     video_info = json.loads(out)
+    log_step("DEBUG: yt-dlp --dump-json FIM")
 
     data_upload = datetime.strptime(video_info["upload_date"], "%Y%m%d")
     titulo_video = video_info["title"]
@@ -626,61 +630,75 @@ def iniciar_processamento(event_path: str):
     cortes = extrair_cortes(relatorio)
     total = len(cortes)
 
-    os.makedirs(LOG_DIR, exist_ok=True)
     log_name = f"historico_{pipeline_start.strftime('%d_%m_%Y_%H_%M_%S')}.md"
     log_path = os.path.join(LOG_DIR, log_name)
+
+    # escreve cabeçalho imediatamente (para não ficar “em branco”)
+    with open(log_path, "w", encoding="utf-8") as log:
+        log.write(f"# Relatório: {titulo_video}\n")
+        log.write(f"- Tipocorte: {tipocorte}\n")
+        log.write(f"- URL: {url_youtube}\n")
+        log.write(f"- Total de cortes: {total}\n")
+        log.write(f"- Saída local: {pasta_local_final}\n")
+        log.write(f"- Destino Drive: {pasta_drive_final}\n\n")
+        log.write("| # | Corte | Modo | Status | Tempo | CPU | GPU |\n|---|---|---|---|---|---|---|\n")
 
     log_step(f"Vídeo: {titulo_video}")
     log_step(f"Cortes detectados: {total}")
     log_step(f"Saída local: {pasta_local_final}")
     log_step(f"Destino Drive: {pasta_drive_final}")
+    log_step(f"Log: {log_path}")
 
-    with open(log_path, "w", encoding="utf-8") as log:
-        log.write(f"# Relatório: {titulo_video}\n- Total: {total}\n\n| # | Corte | Modo | Status | Tempo | CPU | GPU |\n|---|---|---|---|---|---|---|\n")
+    # Se for LOUVOR, baixa o vídeo inteiro uma vez antes de cortar (evita esperar no 1º corte)
+    if tipocorte == "LOUVOR":
+        log_step("LOUVOR: pré-download do vídeo inteiro (cache) para evitar HLS por trecho...")
+        garantir_download_inteiro(url_youtube)
+        log_step("LOUVOR: pré-download OK.")
 
-        for idx, (inicio, duracao, titulo) in enumerate(cortes, 1):
-            cpu, g_temp = obter_telemetria()
-            if g_temp > MAX_GPU_TEMP:
-                log_step(f"GPU quente ({g_temp}°C). Cooldown 30s...")
-                time.sleep(30)
+    for idx, (inicio, duracao, titulo) in enumerate(cortes, 1):
+        cpu, g_temp = obter_telemetria()
+        if g_temp > MAX_GPU_TEMP:
+            log_step(f"GPU quente ({g_temp}°C). Cooldown 30s...")
+            time.sleep(30)
 
-            pct = (idx / total) * 100 if total else 100
-            nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:80]
-            nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
-            cut_start = datetime.now()
+        pct = (idx / total) * 100 if total else 100
+        nome_slug = re.sub(r"[^\w\s-]", "", titulo).replace(" ", "_")[:80]
+        nome_final = f"{nome_slug}__{inicio.replace(':', '-')}"
+        cut_start = datetime.now()
 
-            log_step(f"Corte {idx}/{total} ({pct:.1f}%) INICIO: {titulo} [{inicio} + {duracao}]")
+        log_step(f"Corte {idx}/{total} ({pct:.1f}%) INICIO: {titulo} [{inicio} + {duracao}]")
 
-            modo = "-"
-            status = "ERRO"
-            saida_path = ""
-            section = ""
-            ytdlp_tail = ""
+        modo = "-"
+        status = "ERRO"
+        saida_path = ""
+        section = ""
+        debug_tail = ""
 
-            try:
-                _, modo, out_trecho, saida_path, section = realizar_corte(
-                    url_youtube=url_youtube,
-                    inicio=inicio,
-                    duracao_mmss=duracao,
-                    nome_saida=nome_final,
-                    destino_local=pasta_local_final
-                )
-                status = "OK"
-                ytdlp_tail = (out_trecho or "")[-2000:]
-            except Exception as e:
-                err = str(e)
-                ytdlp_tail = err[-2000:]
-                log_step(f"Corte {idx}/{total} FALHOU: {err}")
+        try:
+            _, modo, out_trecho, saida_path, section = realizar_corte(
+                url_youtube=url_youtube,
+                inicio=inicio,
+                duracao_mmss=duracao,
+                nome_saida=nome_final,
+                destino_local=pasta_local_final,
+                tipocorte=tipocorte
+            )
+            status = "OK"
+            debug_tail = (out_trecho or "")[-2000:]
+        except Exception as e:
+            debug_tail = str(e)[-2000:]
+            log_step(f"Corte {idx}/{total} FALHOU: {e}")
 
-            cut_end = datetime.now()
-            elapsed = (cut_end - cut_start).total_seconds()
-            log_step(f"Corte {idx}/{total} FIM: status={status} modo={modo} tempo={fmt_td(elapsed)} section={section} arquivo={saida_path}")
+        cut_end = datetime.now()
+        elapsed = (cut_end - cut_start).total_seconds()
+        log_step(f"Corte {idx}/{total} FIM: status={status} modo={modo} tempo={fmt_td(elapsed)} section={section} arquivo={saida_path}")
 
+        with open(log_path, "a", encoding="utf-8") as log:
             log.write(f"| {idx} | {titulo} | {modo} | {status} | {fmt_td(elapsed)} | {cpu}% | {g_temp}°C |\n")
-            if ytdlp_tail:
-                log.write(f"\n<details><summary>Debug corte #{idx}</summary>\n\n```\n{ytdlp_tail}\n```\n</details>\n\n")
+            if debug_tail:
+                log.write(f"\n<details><summary>Debug corte #{idx}</summary>\n\n```\n{debug_tail}\n```\n</details>\n\n")
 
-            time.sleep(COOL_DOWN_TIME)
+        time.sleep(COOL_DOWN_TIME)
 
     log_step("Upload: INICIO")
     upload_drive_arquivo_a_arquivo(pasta_local_final, pasta_drive_final)
