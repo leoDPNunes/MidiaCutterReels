@@ -50,6 +50,12 @@ YTDLP_NET_ARGS = [
 ]
 
 # =========================
+# UPLOAD RETRY (EXTRA)
+# =========================
+UPLOAD_MAX_ATTEMPTS = 2          # 1 tentativa + 1 retry extra
+UPLOAD_RETRY_SLEEP_SEC = 8       # espera entre tentativas (pra rate limit/intermitência)
+
+# =========================
 # LOG / STATUS
 # =========================
 def log_step(msg: str):
@@ -239,6 +245,12 @@ def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local)
 def listar_mp4(pasta_local_final: str):
     return sorted(glob.glob(os.path.join(pasta_local_final, "*.mp4")))
 
+def _rclone_copyto_with_progress(src_path: str, dst_path: str):
+    # --progress habilita stats contínuas; --stats 1s atualiza a cada 1s. [web:593]
+    cmd = ["rclone", "copyto", src_path, dst_path, "--progress", "--stats", "1s"]
+    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    return p.returncode, (p.stdout or "")
+
 def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: str):
     files = listar_mp4(pasta_local_final)
     total = len(files)
@@ -246,8 +258,9 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
     ok_count = 0
     err_count = 0
 
-    log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
+    failed = []  # {name, dst, attempts, returncode, tail}
 
+    log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
     if total == 0:
         log_step("Upload: nenhum arquivo .mp4 encontrado para enviar.")
         return
@@ -259,26 +272,52 @@ def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: st
         pct = (i / total) * 100.0
         log_step(f"Upload {i}/{total} ({pct:.1f}%) INICIO: {fname} | OK={ok_count} ERRO={err_count}")
 
-        # --progress habilita stats contínuas; --stats 1s atualiza a cada 1s. [web:593]
-        cmd = ["rclone", "copyto", fpath, dst, "--progress", "--stats", "1s"]
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        last_rc = None
+        last_out = ""
 
-        if p.stdout:
-            print(p.stdout)
+        for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+            log_step(f"Upload {i}/{total}: tentativa {attempt}/{UPLOAD_MAX_ATTEMPTS} -> {fname}")
 
-        if p.returncode == 0:
+            rc, out = _rclone_copyto_with_progress(fpath, dst)
+            last_rc, last_out = rc, out
+
+            if out:
+                print(out)
+
+            if rc == 0:
+                break
+
+            if attempt < UPLOAD_MAX_ATTEMPTS:
+                log_step(f"Upload {i}/{total}: falhou na tentativa {attempt}. Aguardando {UPLOAD_RETRY_SLEEP_SEC}s para retry...")
+                time.sleep(UPLOAD_RETRY_SLEEP_SEC)
+
+        done_pct = (i / total) * 100.0
+
+        if last_rc == 0:
             ok_count += 1
-            done_pct = ((ok_count + err_count) / total) * 100.0
             log_step(f"Upload {i}/{total} FIM: OK | {fname} | Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count}")
         else:
             err_count += 1
-            done_pct = ((ok_count + err_count) / total) * 100.0
-            log_step(f"Upload {i}/{total} FIM: ERRO | {fname} | Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count}")
-            raise RuntimeError(f"Falha no upload {fname}:\n{p.stdout}")
+            tail = last_out[-4000:] if last_out else "(sem saída do rclone)"
+            failed.append({
+                "name": fname,
+                "dst": dst,
+                "attempts": UPLOAD_MAX_ATTEMPTS,
+                "returncode": last_rc,
+                "tail": tail
+            })
+            log_step(f"Upload {i}/{total} FIM: ERRO | {fname} | Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count} (vai continuar)")
 
-    done_pct = ((ok_count + err_count) / total) * 100.0
-    ok_pct = (ok_count / total) * 100.0
-    log_step(f"Upload: concluído. Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count} ({ok_pct:.1f}% OK)")
+    log_step(f"Upload: finalizado. OK={ok_count} ERRO={err_count} (Total={total})")
+
+    if failed:
+        log_step("Upload: ARQUIVOS QUE NÃO SUBIRAM (após retries):")
+        for j, item in enumerate(failed, 1):
+            log_step(f"{j}) {item['name']} -> {item['dst']} (tentativas={item['attempts']}, returncode={item['returncode']})")
+            print(item["tail"])
+
+        names = ", ".join([x["name"] for x in failed])
+        raise RuntimeError(f"Upload falhou para {len(failed)}/{total} arquivo(s) após retries: {names}")
 
 def iniciar_processamento(event_path: str):
     pipeline_start = datetime.now()
