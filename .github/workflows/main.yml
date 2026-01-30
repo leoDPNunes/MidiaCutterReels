@@ -12,13 +12,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Sanity do payload
+      - name: Sanity do payload (robusto)
         shell: powershell
         run: |
-          $url = "${{ github.event.client_payload.url }}"
-          $rel = "${{ github.event.client_payload.relatorio }}"
+          chcp 65001
+          $OutputEncoding = [System.Text.UTF8Encoding]::new()
+          [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
+          $event = Get-Content -Raw -Encoding UTF8 "${{ github.event_path }}" | ConvertFrom-Json
+          $url = [string]$event.client_payload.url
+          $rel = [string]$event.client_payload.relatorio
+
           if (-not $url) { throw "client_payload.url vazio" }
           if (-not $rel) { throw "client_payload.relatorio vazio" }
+
           Write-Host "Payload OK. Job pesado vai aguardar aprovacao no Environment 'producao'."
 
   processamento:
@@ -62,7 +70,9 @@ jobs:
       - name: Smoke test yt-dlp (list-formats)
         shell: powershell
         run: |
-          $url = "${{ github.event.client_payload.url }}"
+          $event = Get-Content -Raw -Encoding UTF8 "${{ github.event_path }}" | ConvertFrom-Json
+          $url = [string]$event.client_payload.url
+
           if ($url -match "\((https?://[^)]+)\)") { $url = $Matches[1] }
           $url = $url.Trim()
 
@@ -74,6 +84,25 @@ jobs:
 
           Write-Host "OK: yt-dlp passou no smoke test."
 
+      - name: Salvar relatorio do payload (UTF-8, sem BOM)
+        shell: powershell
+        run: |
+          chcp 65001
+          $OutputEncoding = [System.Text.UTF8Encoding]::new()
+          [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
+          $event = Get-Content -Raw -Encoding UTF8 "${{ github.event_path }}" | ConvertFrom-Json
+          $rel = [string]$event.client_payload.relatorio
+          if (-not $rel) { throw "client_payload.relatorio vazio" }
+
+          $outPath = Join-Path $PWD "relatorio_payload.txt"
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($outPath, $rel, $utf8NoBom)
+
+          Write-Host "Relatorio salvo em: $outPath"
+          Write-Host ("Tamanho relatorio (chars): " + $rel.Length)
+
       - name: Executar Motor de Corte
         shell: powershell
         run: |
@@ -81,4 +110,5 @@ jobs:
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
           python -X utf8 processar_cortes.py --event-path "${{ github.event_path }}"
