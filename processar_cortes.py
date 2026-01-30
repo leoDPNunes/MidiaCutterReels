@@ -1,5 +1,19 @@
 import os, subprocess, re, time, json, argparse, hashlib
 from datetime import datetime
+import sys
+
+# =========================
+# FIX: stdout/stderr UTF-8 (evita UnicodeEncodeError cp1252 no runner)
+# =========================
+def force_utf8_stdio():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+force_utf8_stdio()  # [web:563][web:534]
+
 import psutil
 import GPUtil
 
@@ -13,31 +27,25 @@ MAX_GPU_TEMP = 80
 COOL_DOWN_TIME = 10
 
 DOWNLOAD_CACHE_DIR = os.path.join(BASE_PATH, "_cache_downloads").replace("\\", "/")
-
-# Se quiser reduzir peso: limite altura (ex: "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best")
 YTDLP_FORMAT_FULL = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best'
 
 # =========================
 # CONFIG "TRAVADA" DO YT-DLP
 # =========================
-# Cookies: yt-dlp espera arquivo no formato Netscape (header "# Netscape HTTP Cookie File"). [web:469]
 YTDLP_COOKIES_TXT_PATH = r"D:\secrets\yt_cookies.txt"
-YTDLP_COOKIES_ARGS = ["--cookies", YTDLP_COOKIES_TXT_PATH]  # [web:347]
+YTDLP_COOKIES_ARGS = ["--cookies", YTDLP_COOKIES_TXT_PATH]
 
-# EJS: habilita download do solver via GitHub quando necessário. [web:393]
-YTDLP_EJS_ARGS = ["--remote-components", "ejs:github"]  # [web:393]
+YTDLP_EJS_ARGS = ["--remote-components", "ejs:github"]
 
-# JS runtime: aponta node explicitamente (necessário no seu setup com nvm). [web:325]
 YTDLP_NODE_EXE = r"C:\nvm4w\nodejs\node.exe"
-YTDLP_JS_ARGS = ["--js-runtimes", f"node:{YTDLP_NODE_EXE}"]  # [web:325]
+YTDLP_JS_ARGS = ["--js-runtimes", f"node:{YTDLP_NODE_EXE}"]
 
-# Rede: IPv4 + retries (fragment e backoff). [web:325]
 YTDLP_NET_ARGS = [
     "-4",
     "--retries", "10",
     "--fragment-retries", "10",
     "--retry-sleep", "exp=1:20:2",
-]  # [web:325]
+]
 
 def obter_telemetria():
     cpu = psutil.cpu_percent()
@@ -134,7 +142,6 @@ def cache_key_for_url(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
 
 def ytdlp_base_cmd():
-    # padrão pedido por você: sempre construir assim
     return ["yt-dlp", *YTDLP_COOKIES_ARGS, *YTDLP_EJS_ARGS, *YTDLP_JS_ARGS, *YTDLP_NET_ARGS]
 
 def garantir_download_inteiro(url_youtube: str, log_fn=print) -> str:
@@ -209,7 +216,6 @@ def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local,
     os.makedirs(destino_local, exist_ok=True)
     saida_path = os.path.join(destino_local, f"{nome_saida}.mp4")
 
-    # B) baixar trecho
     ok, out_trecho = tentar_baixar_trecho(url_youtube, inicio, duracao_mmss, saida_path, log_fn=log_fn)
     if ok:
         return True, "B", out_trecho
@@ -219,29 +225,17 @@ def realizar_corte(url_youtube, inicio, duracao_mmss, nome_saida, destino_local,
     else:
         log_fn("⚠️ Trecho falhou (não-403).")
 
-    # A) fallback: baixar inteiro e cortar local
     log_fn("🔁 Fallback: baixando vídeo inteiro (cache) e cortando localmente...")
-    try:
-        video_local = garantir_download_inteiro(url_youtube, log_fn=log_fn)
-        cortar_local(video_local, inicio, duracao_mmss, saida_path)
-        return True, "A", out_trecho
-    except Exception as e:
-        out_full = str(e)
-        if is_403(out_trecho) and is_403(out_full):
-            log_fn("❌ Ambos falharam com 403: provável recusa/bloqueio do YouTube ou assinatura/URL temporária expirada/recusada.")
-        raise
+    video_local = garantir_download_inteiro(url_youtube, log_fn=log_fn)
+    cortar_local(video_local, inicio, duracao_mmss, saida_path)
+    return True, "A", out_trecho
 
 def iniciar_processamento(event_path: str):
-    try:
-        url_youtube, relatorio = ler_event_payload(event_path)
-        if not url_youtube:
-            raise ValueError("client_payload.url vazio")
-        if not relatorio.strip():
-            raise ValueError("client_payload.relatorio vazio")
-    except Exception as e:
-        print(f"❌ Erro ao ler payload do evento: {e}")
-        time.sleep(10)
-        return
+    url_youtube, relatorio = ler_event_payload(event_path)
+    if not url_youtube:
+        raise ValueError("client_payload.url vazio")
+    if not relatorio.strip():
+        raise ValueError("client_payload.relatorio vazio")
 
     start_time = datetime.now()
     log_name = f"historico_{start_time.strftime('%d_%m_%Y_%H_%M_%S')}.md"
@@ -250,7 +244,6 @@ def iniciar_processamento(event_path: str):
 
     print(f"🔍 Analisando vídeo: {url_youtube}")
 
-    # dump-json usando a mesma base cmd travada
     cmd_info = [*ytdlp_base_cmd(), "--dump-json", url_youtube]
     rc, out = run_cmd(cmd_info, check=False)
     if rc != 0:
@@ -288,7 +281,7 @@ def iniciar_processamento(event_path: str):
             ytdlp_tail = ""
 
             try:
-                ok, modo, out_trecho = realizar_corte(
+                _, modo, out_trecho = realizar_corte(
                     url_youtube=url_youtube,
                     inicio=inicio,
                     duracao_mmss=duracao,
