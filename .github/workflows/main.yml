@@ -20,11 +20,43 @@ jobs:
           git rev-parse HEAD
           echo "workflow_sha = ${{ github.workflow_sha }}"
 
-      - name: Verificar Python deps
+      - name: Identidade do runner
         shell: powershell
         run: |
-          python --version
-          python -c "import psutil, GPUtil; print('deps OK')"
+          whoami
+          echo "UserProfile=$env:USERPROFILE"
+          echo "Path=$env:PATH"
+
+      - name: Validar cookies/node/tools
+        shell: powershell
+        run: |
+          $cookiePath = "D:\secrets\yt_cookies.txt"
+          $nodePath   = "C:\nvm4w\nodejs\node.exe"
+
+          if (!(Test-Path $cookiePath)) { throw "cookies.txt nao existe: $cookiePath" }
+
+          # Testa leitura (se der Access is denied, e permissao NTFS)
+          Get-Content -Path $cookiePath -TotalCount 1 | Out-Null
+          Write-Host "OK: cookies.txt existe e pode ser lido"
+
+          if (!(Test-Path $nodePath)) { throw "node.exe nao existe: $nodePath" }
+          & $nodePath -v
+
+          yt-dlp --version
+          ffmpeg -version
+
+      - name: Smoke test yt-dlp (list-formats)
+        shell: powershell
+        run: |
+          $url = "${{ github.event.client_payload.url }}"
+          if ($url -match "\((https?://[^)]+)\)") { $url = $Matches[1] }
+          $url = $url.Trim()
+
+          yt-dlp --cookies "D:\secrets\yt_cookies.txt" `
+                --remote-components ejs:github `
+                --js-runtimes "node:C:\nvm4w\nodejs\node.exe" `
+                -4 --retries 3 --fragment-retries 3 --retry-sleep "exp=1:10:2" `
+                --list-formats "$url"
 
       - name: Executar Motor de Corte
         shell: powershell
