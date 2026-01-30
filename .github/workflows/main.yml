@@ -20,6 +20,12 @@ jobs:
           git rev-parse HEAD
           echo "workflow_sha = ${{ github.workflow_sha }}"
 
+      - name: Verificar Python deps
+        shell: powershell
+        run: |
+          python --version
+          python -c "import psutil, GPUtil; print('deps OK')"
+
       - name: Executar Motor de Corte
         shell: powershell
         run: python processar_cortes.py --event-path "${{ github.event_path }}"
