@@ -8,9 +8,14 @@ jobs:
     runs-on: self-hosted
     steps:
       - uses: actions/checkout@v3
+
+      - name: Debug payload (opcional)
+        shell: pwsh
+        run: |
+          echo "event_type: ${{ github.event.action }}"
+          echo '${{ toJson(github.event.client_payload) }}'
+
       - name: Executar Motor de Corte
-        shell: cmd
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Permissão para o script ler o relatório
-          RUN_ID: ${{ github.run_id }}
-        run: python processar_cortes.py
+        shell: pwsh
+        run: |
+          python processar_cortes.py --event-path "${{ github.event_path }}"
