@@ -150,11 +150,6 @@ def run_cmd(cmd, check=True):
         raise RuntimeError(p.stdout)
     return p.returncode, p.stdout
 
-def is_403(output: str) -> bool:
-    if not output:
-        return False
-    return ("HTTP Error 403" in output) or ("403 Forbidden" in output) or ("status code 403" in output)
-
 def cache_key_for_url(url: str) -> str:
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
 
@@ -247,27 +242,43 @@ def listar_mp4(pasta_local_final: str):
 def upload_drive_arquivo_a_arquivo(pasta_local_final: str, pasta_drive_final: str):
     files = listar_mp4(pasta_local_final)
     total = len(files)
+
+    ok_count = 0
+    err_count = 0
+
     log_step(f"Upload: iniciando rclone arquivo-a-arquivo. Total={total}")
+
+    if total == 0:
+        log_step("Upload: nenhum arquivo .mp4 encontrado para enviar.")
+        return
 
     for i, fpath in enumerate(files, 1):
         fname = os.path.basename(fpath)
         dst = f"{pasta_drive_final}/{fname}"
-        log_step(f"Upload {i}/{total} INICIO: {fname}")
+
+        pct = (i / total) * 100.0
+        log_step(f"Upload {i}/{total} ({pct:.1f}%) INICIO: {fname} | OK={ok_count} ERRO={err_count}")
 
         # --progress habilita stats contínuas; --stats 1s atualiza a cada 1s. [web:593]
         cmd = ["rclone", "copyto", fpath, dst, "--progress", "--stats", "1s"]
         p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
-        # imprime o progresso/stats no log do Actions/PowerShell
         if p.stdout:
             print(p.stdout)
 
-        if p.returncode != 0:
+        if p.returncode == 0:
+            ok_count += 1
+            done_pct = ((ok_count + err_count) / total) * 100.0
+            log_step(f"Upload {i}/{total} FIM: OK | {fname} | Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count}")
+        else:
+            err_count += 1
+            done_pct = ((ok_count + err_count) / total) * 100.0
+            log_step(f"Upload {i}/{total} FIM: ERRO | {fname} | Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count}")
             raise RuntimeError(f"Falha no upload {fname}:\n{p.stdout}")
 
-        log_step(f"Upload {i}/{total} FIM: {fname}")
-
-    log_step("Upload: concluído.")
+    done_pct = ((ok_count + err_count) / total) * 100.0
+    ok_pct = (ok_count / total) * 100.0
+    log_step(f"Upload: concluído. Geral={done_pct:.1f}% OK={ok_count} ERRO={err_count} ({ok_pct:.1f}% OK)")
 
 def iniciar_processamento(event_path: str):
     pipeline_start = datetime.now()
