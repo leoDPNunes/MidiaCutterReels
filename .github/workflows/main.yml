@@ -13,6 +13,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
+      - name: Mostrar SHA
+        shell: powershell
+        run: |
+          echo "github.sha = ${{ github.sha }}"
+          git rev-parse HEAD
+          echo "workflow_sha = ${{ github.workflow_sha }}"
+
       - name: Executar Motor de Corte
         shell: powershell
         run: python processar_cortes.py --event-path "${{ github.event_path }}"
