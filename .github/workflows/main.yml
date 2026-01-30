@@ -27,7 +27,7 @@ jobs:
           echo "UserProfile=$env:USERPROFILE"
           echo "Path=$env:PATH"
 
-      - name: Validar cookies/node/tools
+      - name: Validar cookies/node/tools (inclui ACL)
         shell: powershell
         run: |
           $cookiePath = "D:\secrets\yt_cookies.txt"
@@ -35,7 +35,9 @@ jobs:
 
           if (!(Test-Path $cookiePath)) { throw "cookies.txt nao existe: $cookiePath" }
 
-          # Testa leitura (se der Access is denied, e permissao NTFS)
+          Write-Host "ACL do cookies.txt:"
+          icacls $cookiePath
+
           Get-Content -Path $cookiePath -TotalCount 1 | Out-Null
           Write-Host "OK: cookies.txt existe e pode ser lido"
 
