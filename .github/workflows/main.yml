@@ -11,7 +11,6 @@ jobs:
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
-      PYTHONLEGACYWINDOWSSTDIO: "utf-8"
 
     steps:
       - name: Checkout
@@ -24,12 +23,15 @@ jobs:
           git rev-parse HEAD
           echo "workflow_sha = ${{ github.workflow_sha }}"
 
-      - name: Identidade do runner
+      - name: Forçar UTF-8 no PowerShell
         shell: powershell
         run: |
-          whoami
-          echo "UserProfile=$env:USERPROFILE"
-          echo "Path=$env:PATH"
+          chcp 65001
+          $OutputEncoding = [System.Text.UTF8Encoding]::new()
+          [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+          Write-Host "OK: PowerShell/Console em UTF-8"
+          python -c "import sys; print(sys.version); print(sys.stdout.encoding)"
 
       - name: Validar cookies/node/tools (inclui ACL)
         shell: powershell
@@ -66,4 +68,9 @@ jobs:
 
       - name: Executar Motor de Corte
         shell: powershell
-        run: python -X utf8 processar_cortes.py --event-path "${{ github.event_path }}"
+        run: |
+          chcp 65001
+          $OutputEncoding = [System.Text.UTF8Encoding]::new()
+          [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+          python -X utf8 processar_cortes.py --event-path "${{ github.event_path }}"
