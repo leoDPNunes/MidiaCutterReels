@@ -8,6 +8,7 @@ jobs:
   preparar:
     name: preparar
     runs-on: [self-hosted, Windows, X64, midia-cutter]
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -15,25 +16,29 @@ jobs:
       - name: Sanity do payload (robusto)
         shell: powershell
         run: |
-          chcp 65001
+          chcp 65001 | Out-Null
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
 
-          $event = Get-Content -Raw -Encoding UTF8 "${{ github.event_path }}" | ConvertFrom-Json
+          $eventPath = "${{ github.event_path }}"
+          if (!(Test-Path $eventPath)) { throw "github.event_path não existe: $eventPath" }
+
+          $event = Get-Content -Raw -Encoding UTF8 $eventPath | ConvertFrom-Json
           $url = [string]$event.client_payload.url
           $rel = [string]$event.client_payload.relatorio
 
           if (-not $url) { throw "client_payload.url vazio" }
           if (-not $rel) { throw "client_payload.relatorio vazio" }
 
-          Write-Host "Payload OK. Job pesado vai aguardar aprovacao no Environment 'producao'."
+          Write-Host "Payload OK. Aguardando aprovacao do Environment 'producao' para iniciar o processamento."
 
   processamento:
     name: processamento
     needs: preparar
     runs-on: [self-hosted, Windows, X64, midia-cutter]
     environment: producao
+
     env:
       PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
@@ -45,10 +50,11 @@ jobs:
       - name: Forçar UTF-8 no PowerShell
         shell: powershell
         run: |
-          chcp 65001
+          chcp 65001 | Out-Null
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
           python -c "import sys; print(sys.version); print('stdout=', sys.stdout.encoding)"
 
       - name: Validar cookies/node/tools
@@ -70,8 +76,14 @@ jobs:
       - name: Smoke test yt-dlp (list-formats)
         shell: powershell
         run: |
+          chcp 65001 | Out-Null
+          $OutputEncoding = [System.Text.UTF8Encoding]::new()
+          [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+
           $event = Get-Content -Raw -Encoding UTF8 "${{ github.event_path }}" | ConvertFrom-Json
           $url = [string]$event.client_payload.url
+          if (-not $url) { throw "client_payload.url vazio" }
 
           if ($url -match "\((https?://[^)]+)\)") { $url = $Matches[1] }
           $url = $url.Trim()
@@ -87,7 +99,7 @@ jobs:
       - name: Salvar relatorio do payload (UTF-8, sem BOM)
         shell: powershell
         run: |
-          chcp 65001
+          chcp 65001 | Out-Null
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
@@ -106,7 +118,7 @@ jobs:
       - name: Executar Motor de Corte
         shell: powershell
         run: |
-          chcp 65001
+          chcp 65001 | Out-Null
           $OutputEncoding = [System.Text.UTF8Encoding]::new()
           [Console]::InputEncoding  = [System.Text.UTF8Encoding]::new()
           [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
