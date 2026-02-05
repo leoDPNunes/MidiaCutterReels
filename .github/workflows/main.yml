@@ -11,16 +11,22 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Sanity minima (sem ler JSON)
+      - name: Sanity minima (sem parse de JSON)
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
+
           $eventPath = $env:GITHUB_EVENT_PATH
           if (-not $eventPath) { throw "GITHUB_EVENT_PATH vazio" }
-          if (!(Test-Path -LiteralPath $eventPath)) { throw "Arquivo do evento nao existe: $eventPath" }
+
+          if (!(Test-Path -LiteralPath $eventPath -PathType Leaf)) {
+            throw "Arquivo do evento nao existe: $eventPath"
+          }
+
           $len = (Get-Item -LiteralPath $eventPath).Length
-          if ($len -lt 10) { throw "Arquivo do evento muito pequeno ($len bytes): $eventPath" }
-          "OK: evento presente em $eventPath ($len bytes)"
+          if ($len -lt 20) { throw "Arquivo do evento muito pequeno ($len bytes): $eventPath" }
+
+          "OK: evento presente ($len bytes). Aguardando aprovacao do environment."
 
   processamento:
     needs: preparar
@@ -29,8 +35,8 @@ jobs:
     timeout-minutes: 360
 
     env:
-      PYTHONIOENCODING: utf-8
       PYTHONUTF8: "1"
+      PYTHONIOENCODING: utf-8
 
     steps:
       - uses: actions/checkout@v3
@@ -44,7 +50,7 @@ jobs:
           rclone version
           python -c "import sys; print(sys.version); print('stdout=', sys.stdout.encoding)"
 
-      - name: Executar motor (somente via GITHUB_EVENT_PATH)
+      - name: Executar motor (somente via arquivo do evento)
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
